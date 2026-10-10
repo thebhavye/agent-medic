@@ -204,8 +204,17 @@ def standby(root: Path, good: str, live: str, files: list[str] | None = None, ba
     if calls:
         limits["tool_calls_per_request"] = max(round(calls * 1.5), round(calls) + 2)
     now = time.time()
-    return {"good_release": good[:12], "issued_at": now, "expires_at": now + STANDBY_TTL_S,
-            "functions": functions, "values": values, "limits": limits}
+    return {"good_release": good[:12], "live_release": live[:12], "issued_at": now,
+            "expires_at": now + STANDBY_TTL_S, "functions": functions, "values": values, "limits": limits}
+
+
+def runtime_engagement(release: str) -> dict | None:
+    """What the runtime itself decided for a release (engaged / not_code), from its shared state."""
+    try:
+        state = json.loads((bundle_path().parent / "runtime-state.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return state.get(release[:12])
 
 
 def current_standby() -> dict | None:

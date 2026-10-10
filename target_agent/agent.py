@@ -52,6 +52,8 @@ def _answer(question: str, provider) -> dict:
     started = time.monotonic()
 
     def finish(status: str, answer: str = "", error: str = "") -> dict:
+        if status != "ok":
+            medic.failed(error)     # an error, refusal or max_tokens is a failed request for the runtime too
         return {
             "status": status,
             "answer": answer,

@@ -20,5 +20,5 @@ Standard library only: this module ships inside the user's agent.
 """
 
 from medic_runtime.core import (  # noqa: F401
-    FirstAidError, answer, call_model, guard_tool, interventions, request, reset, status, surface, value,
+    FirstAidError, answer, call_model, failed, guard_tool, interventions, request, reset, status, surface, value,
 )

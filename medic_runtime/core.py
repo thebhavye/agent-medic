@@ -22,6 +22,7 @@ import inspect
 import json
 import os
 import re
+import secrets
 import textwrap
 import threading
 import time
@@ -61,6 +62,7 @@ class FirstAidError(RuntimeError):
 
 
 _lock = threading.Lock()
+_state_lock = threading.Lock()     # serializes engagement decisions within this process
 _cache: dict = {}                  # env var -> {"at", "source", "payload"}
 _surfaces: dict = {}               # name -> original function
 _values: set = set()
@@ -185,13 +187,16 @@ def _write_state(state: dict) -> None:
         _local_state.clear()
         _local_state.update(state)
         return
+    # A temporary file per write (process, thread, random), published with an atomic replace:
+    # a reader sees the old state or the new one, never a half-written file.
+    tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.{secrets.token_hex(4)}.tmp"
     try:
-        tmp = f"{path}.{os.getpid()}.tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(state, f)
         os.replace(tmp, path)
     except OSError:
-        pass                            # another process won the race; its write is as good
+        with contextlib.suppress(OSError):
+            os.remove(tmp)              # another process won the race; its write is as good
 
 
 def _engagement() -> dict | None:
@@ -238,51 +243,70 @@ def _changed_since_good(standby: dict) -> list[str]:
     return sorted(changed)
 
 
-def _record_outcome(failed: bool) -> None:
-    """Judge the last few requests; engage the standby, or give it up if it didn't help."""
+def _record_outcome(failed: bool, aided: bool = False) -> None:
+    """Judge the last few requests; engage the standby, or give it up if it didn't help.
+
+    A request counts for the side it actually ran on: `aided` means it used the standby. A
+    request that started on the live code and finished after the engagement is live-code
+    evidence, not evidence against the standby (requests run in parallel)."""
     standby = _standby()
     if standby is None:
         return
-    engaged = _engagement()
-    with _lock:
-        _outcomes.append((failed, bool(engaged)))
-        del _outcomes[:-TRIP_WINDOW * 2]
-        window = [f for f, e in _outcomes if e == bool(engaged)][-TRIP_WINDOW:]
-    state = _read_state()
-    entry = state.get(_release()) or {}
-    if engaged is None:
-        if entry.get("status") == "not_code" and time.time() - float(entry.get("at") or 0) < NOT_CODE_COOLDOWN_S:
+    if _payload() is not None:
+        return                          # Medic's targeted first aid is in charge of this release
+    # One decision at a time in this process: requests run in parallel threads, and two of them
+    # deciding together would each rewrite the state from the same stale read.
+    with _state_lock:
+        engaged = _engagement()
+        with _lock:
+            _outcomes.append((failed, aided))
+            del _outcomes[:-TRIP_WINDOW * 4]
+            window = [f for f, a in _outcomes if a == bool(engaged)][-TRIP_WINDOW:]
+        state = _read_state()
+        entry = state.get(_release()) or {}
+        report = None
+        if engaged is None:
+            if entry.get("status") == "not_code" and time.time() - float(entry.get("at") or 0) < NOT_CODE_COOLDOWN_S:
+                return
+            if sum(window) < TRIP_FAILURES:
+                return
+            names = _changed_since_good(standby)
+            if not names:
+                return                  # nothing changed since the good release: not a code problem
+            state[_release()] = {"status": "engaged", "names": names, "at": time.time(),
+                                 "good_release": str(standby.get("good_release", ""))[:12]}
+            report = ("engaged", f"{sum(window)} of the last {len(window)} requests failed; running "
+                                 f"{', '.join(names)} from {str(standby.get('good_release', ''))[:8]}")
+        elif len(window) >= TRIP_WINDOW and sum(window) >= TRIP_FAILURES:
+            # Still failing with the last known good in place: the cause isn't these parts.
+            state[_release()] = {"status": "not_code", "at": time.time()}
+            report = ("released", "the last known good versions did not help; back to the live code")
+        if report is None:
             return
-        if sum(window) < TRIP_FAILURES:
-            return
-        names = _changed_since_good(standby)
-        if not names:
-            return                      # nothing changed since the good release: not a code problem
-        state[_release()] = {"status": "engaged", "names": names, "at": time.time(),
-                             "good_release": str(standby.get("good_release", ""))[:12]}
         _write_state(state)
         with _lock:
             _outcomes.clear()
-        _report("auto", "engaged", f"{sum(window)} of the last {len(window)} requests failed; running "
-                                   f"{', '.join(names)} from {str(standby.get('good_release', ''))[:8]}")
-    elif len(window) >= TRIP_WINDOW and sum(window) >= TRIP_FAILURES:
-        # Still failing with the last known good in place: the cause isn't these parts.
-        state[_release()] = {"status": "not_code", "at": time.time()}
-        _write_state(state)
-        with _lock:
-            _outcomes.clear()
-        _report("auto", "released", "the last known good versions did not help; back to the live code")
+    _report("auto", *report)
 
 
 def _patch(kind: str, name: str):
-    """(how, patch) for a registered part: Medic's targeted first aid wins over the standby."""
-    targeted = ((_payload() or {}).get(kind) or {})
-    if name in targeted:
-        return ("function" if kind == "functions" else "value"), targeted[name]
+    """(how, patch) for a registered part.
+
+    A targeted bundle for this release replaces the automatic engagement entirely: production
+    then runs exactly the combination Medic proved in its trial, not that plus leftovers."""
+    payload = _payload()
+    if payload is not None:
+        targeted = payload.get(kind) or {}
+        if name in targeted:
+            return ("function" if kind == "functions" else "value"), targeted[name]
+        return None, None
     engaged = _engagement()
     if engaged and name in engaged.get("names", []):
         standby = (_standby() or {}).get(kind) or {}
         if name in standby:
+            scope = _request.get()
+            if scope is not None:
+                scope["aided"] = True   # this request ran on the last known good
             return "auto", standby[name]
     return None, None
 
@@ -379,7 +403,7 @@ def value(name: str, default):
 def request():
     """One agent request: the scope for the loop guard, for reporting each fix once, and the
     unit armed mode judges (did this request fail the way code makes requests fail?)."""
-    scope = {"calls": {}, "reported": set(), "failed": False, "tool_calls": 0}
+    scope = {"calls": {}, "reported": set(), "failed": False, "tool_calls": 0, "aided": False}
     token = _request.set(scope)
     try:
         yield
@@ -393,7 +417,7 @@ def request():
             budget = ((_standby() or {}).get("limits") or {}).get("tool_calls_per_request")
             if budget and scope["tool_calls"] > budget:
                 scope["failed"] = True
-            _record_outcome(scope["failed"])
+            _record_outcome(scope["failed"], scope["aided"])
         except Exception:  # noqa: BLE001 - judging must never break the agent
             pass
 
@@ -404,6 +428,13 @@ def answer(text: str) -> str:
     if scope is not None and (not text or NON_ANSWER.search(text)):
         scope["failed"] = True
     return text
+
+
+def failed(reason: str = "") -> None:
+    """Tell the runtime this request ended without an answer (an error, a refusal, max tokens)."""
+    scope = _request.get()
+    if scope is not None:
+        scope["failed"] = True
 
 
 def guard_tool(name: str, args, run):

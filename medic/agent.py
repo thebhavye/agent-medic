@@ -61,12 +61,16 @@ class Medic:
         if not healthy:
             return
         try:
+            live = world.head()
             current = first_aid.current_standby()
+            # Rebuilt when the healthy release moves, when a new release goes live (it may
+            # register parts the old standby doesn't cover), and well before it expires.
             fresh = (current and current.get("good_release") == healthy[:12]
+                     and current.get("live_release") == live[:12]
                      and time.time() - float(current.get("issued_at") or 0) < first_aid.STANDBY_TTL_S / 2)
             if fresh:
                 return
-            body = first_aid.standby(paths.DEPLOY, world.git("rev-parse", healthy), world.head(),
+            body = first_aid.standby(paths.DEPLOY, world.git("rev-parse", healthy), live,
                                      baseline=self.watcher.state.get("baseline"))
             first_aid.write(first_aid.standby_path(), body)
             self.log(f"[medic] runtime armed: last known good of {len(body['functions']) + len(body['values'])} "
@@ -97,13 +101,19 @@ class Medic:
         inc = Incident(signals=[s.__dict__ for s in signals], release=world.head(),
                        healthy_release=self._healthy_release(), trace_ids=[e.trace_id for e in recent])
         inc.note("open", "; ".join(s.describe() for s in signals), self.log)
-        healed = sorted({f.split(":", 1)[1] for e in recent for f in e.first_aid if f.startswith("auto:")} - {"engaged"})
-        if healed:
-            # The runtime already stepped in on its own; Medic's targeted first aid may refine it.
+        # Did the runtime already step in on its own? Trust its shared state for whether it still
+        # is (it may have released a standby that didn't help); the trace spans name the parts.
+        engagement = first_aid.runtime_engagement(inc.release) or {}
+        if engagement.get("status") == "engaged":
+            healed = sorted(engagement.get("names") or [])
             inc.first_aid = {"status": "auto", "what": ", ".join(healed) + " from the last known good release",
-                             "functions": healed, "applied_at": time.time()}
+                             "functions": healed, "base": engagement.get("good_release"),
+                             "applied_at": float(engagement.get("at") or time.time())}
             inc.note("first_aid", f"the runtime healed requests by itself: running {', '.join(healed)} "
                                   "from the last known good release", self.log)
+        elif engagement.get("status") == "not_code":
+            inc.note("first_aid", "the runtime tried the last known good and released it: the cause isn't in "
+                                  "the parts that changed", self.log)
         incidents.save(inc)
         return inc
 
