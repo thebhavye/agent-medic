@@ -31,6 +31,7 @@ class Incident:
     remedy: dict = field(default_factory=dict)
     deploy: dict = field(default_factory=dict)
     monitor: dict = field(default_factory=dict)
+    first_aid: dict = field(default_factory=dict)     # the stand-in that serves users until the cure
     timeline: list = field(default_factory=list)
 
     @property

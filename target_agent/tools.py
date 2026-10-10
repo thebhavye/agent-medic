@@ -4,6 +4,8 @@ import os
 
 import httpx
 
+import medic_runtime as medic
+
 KB_URL = os.environ.get("KB_URL", "http://127.0.0.1:8781")
 TIMEOUT_S = 10
 
@@ -34,16 +36,20 @@ TOOL_SCHEMAS = [
 ]
 
 
+# Registered with Medic's runtime: during an incident it may run their last healthy versions.
+@medic.surface("kb_client")
 def _get(path: str, **params):
     resp = httpx.get(KB_URL + path, params=params, timeout=TIMEOUT_S)
     resp.raise_for_status()
     return resp.json()
 
 
+@medic.surface("search_docs")
 def search_docs(query: str) -> list[dict]:
     return [{"id": h["id"], "title": h["title"], "snippet": h["snippet"]} for h in _get("/search", q=query)]
 
 
+@medic.surface("read_doc")
 def read_doc(doc_id: str) -> str:
     return _get(f"/docs/{doc_id}")["body"]
 

@@ -12,7 +12,7 @@ import sys
 import time
 
 from bisect_agent import gitops
-from medic import paths, rollout
+from medic import first_aid, paths, rollout
 
 
 def run_batch(size: int, workers: int) -> dict:
@@ -29,7 +29,9 @@ def run_batch(size: int, workers: int) -> dict:
         cmd = [sys.executable, "-m", "target_agent.run_eval", "--cases", str(cases_file), "--out", str(out_file),
                "--session", f"prod-{sha[:8]}-{stamp}", "--tag", "env:prod", "--tag", f"release:{sha[:12]}",
                "--workers", str(workers)]
-        env = {**os.environ, "PYTHONPATH": str(code_dir), "KB_URL": paths.KB_URL}
+        # Production reads Medic's first-aid bundle; it applies only to the release it was issued for.
+        env = {**os.environ, "PYTHONPATH": str(code_dir), "KB_URL": paths.KB_URL,
+               "MEDIC_CONTROL": str(first_aid.bundle_path()), "MEDIC_RELEASE": sha[:12]}
         subprocess.run(cmd, cwd=code_dir, env=env, capture_output=True, timeout=1800)
 
     try:

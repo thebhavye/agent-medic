@@ -231,7 +231,7 @@ footer{color:var(--faint);font-size:12px;text-align:center;padding:10px 0 40px}
 "use strict";
 var DATA = null, LAST = "", FETCHED = 0, OPEN = new Set();
 var PHASE_LABEL = {open:"Detected", triaged:"Triaged", investigated:"Investigated", decided:"Diagnosed",
-  remedied:"Fix ready", canary:"Canary", deployed:"Promoted", resolved:"Healed", escalated:"Escalated"};
+  first_aid:"First aid", remedied:"Fix ready", canary:"Canary", deployed:"Promoted", resolved:"Healed", escalated:"Escalated"};
 var OPEN_PHASES = ["open","triaged","investigated","decided","remedied","canary","deployed"];
 
 /* ---------- helpers ---------- */
@@ -333,6 +333,9 @@ function headline(){
   var ro = DATA.rollout, inc = openIncident(), last = (DATA.incidents || [])[0];
   if (ro) return {kind:"warn", tag:"Canary", text:"A Medic fix is serving " + pct(ro.share) + " of production",
     sub:"candidate " + short(ro.candidate) + " · " + (ro.canary_traces || 0) + " canary traces so far · started " + clock(ro.started)};
+  if (inc && (inc.first_aid || {}).status === "active") return {kind:"warn", tag:"First aid",
+    text:"Users are being served by first aid while Medic prepares the cure",
+    sub:["incident " + inc.id + " · " + (inc.first_aid.what || "") + " · opened ", since(inc.opened_at, "", " ago")]};
   if (inc) return {kind: inc.phase === "open" || inc.phase === "triaged" ? "bad" : "warn", tag:"Incident",
     text: (PHASE_LABEL[inc.phase] || inc.phase) + ": " + (inc.symptom || "production is failing"),
     sub:["incident " + inc.id + " · opened " + clock(inc.opened_at) + " · ", since(inc.opened_at, "", " ago")]};
@@ -464,7 +467,7 @@ function chart(prod, inc){
   svg.appendChild(S("text", {x:L - 8, y:yB + laneB * .72 + 4, "text-anchor":"end", "font-size":10}, "ok"));
 
   // incident markers
-  var marks = {open:"detected", decided:"diagnosed", canary:"canary", deployed:"promoted", resolved:"healed", escalated:"escalated"};
+  var marks = {open:"detected", decided:"diagnosed", first_aid:"first aid", canary:"canary", deployed:"promoted", resolved:"healed", escalated:"escalated"};
   var lastX = -1e9, row = 0;
   events.forEach(function(e){
     if (!marks[e.phase]) return;
@@ -517,7 +520,7 @@ function caseFile(inc){
   }));
 
   var body = [rail,
-    detectStage(inc), diagnoseStage(inc), repairStage(inc), canaryStage(inc), healStage(inc),
+    detectStage(inc), diagnoseStage(inc), firstAidStage(inc), repairStage(inc), canaryStage(inc), healStage(inc),
     keyedDetails("log:" + inc.id, "Full incident log (" + (inc.timeline || []).length + " events)", h("div", {class:"log", style:"margin-top:8px"},
       (inc.timeline || []).map(function(e){ return h("div", null, h("span", {class:"mono faint"}, "+" + dur(e.t - inc.opened_at)), h("span", {class:"p"}, PHASE_LABEL[e.phase] || e.phase), h("span", null, e.msg)); })))];
   return card("Incident " + inc.id, ["opened " + day(inc.opened_at) + " · ", total], body, picker);
@@ -587,10 +590,42 @@ function bar(label, frac, color, value){
     h("span", {class:"mono"}, value != null ? String(value) : pct(frac)));
 }
 
+function firstAidStage(inc){
+  var fa = inc.first_aid || {};
+  if (!fa.status) return stage(3, reached(inc, "decided") ? "done" : "pending", "First aid", null,
+    reached(inc, "decided") ? "Not needed for this cause: the cure goes straight ahead." :
+      "As soon as the culprit is known, Medic stands in its healthy version so users are served while the cure is made.", null);
+  var trial = fa.trial || {}, before = fa.before || {};
+  var lede = {
+    active: "Users are served by the culprit's healthy version, inside the running agent, while the cure is made.",
+    removed: "Users were served by the culprit's healthy version until the cure went live; then Medic took it off.",
+    rejected: "Medic tried a stand-in, but it did not restore answers on the broken release, so it was not applied.",
+    not_possible: "Nothing the agent registered with Medic's runtime could stand in for the culprit; users wait for the cure.",
+    error: "First aid could not be planned; the cure goes ahead."}[fa.status] || "";
+  var body = [];
+  if (fa.what && fa.what !== "nothing") body.push(h("div", {class:"box sunk"}, h("h4", null, "Stood in"), fa.what,
+    fa.base ? h("div", {class:"faint", style:"font-size:12px;margin-top:4px"}, ["from ", sha(fa.base), ", the culprit's parent: nothing else that shipped with it is undone"]) : null));
+  if (trial.pass_rate != null) body.push(h("div", {class:"bars", style:"max-width:520px;margin-top:10px"},
+    before.pass_rate != null ? bar("without", before.pass_rate, "var(--bad)") : null,
+    bar("with it", trial.pass_rate, trial.pass_rate >= .75 ? "var(--ok)" : "var(--bad)"),
+    h("div", {class:"faint", style:"font-size:12px"}, "known-answer eval on the broken release" +
+      (trial.tool_calls_per_run != null && before.tool_calls_per_run != null ? " · tool calls per run " +
+        (+before.tool_calls_per_run).toFixed(1) + " → " + (+trial.tool_calls_per_run).toFixed(1) : ""))));
+  if (fa.reason) body.push(h("p", {class:"muted", style:"font-size:13px;margin:8px 0 0"}, fa.reason));
+  if (fa.status === "active") body.push(h("div", {class:"outcome warn"}, h("span", {class:"ic"}, "+"),
+    h("span", null, "Active on ", sha(inc.release), h("span", {class:"muted", style:"font-weight:400"},
+      " · bound to that release, signed, expires " + clock(fa.expires_at)))));
+  if (fa.status === "removed") body.push(h("div", {class:"outcome ok"}, h("span", {class:"ic"}, "✓"),
+    h("span", null, "Removed at " + clock(fa.removed_at) + ": the cure is live")));
+  var state = {active:"now", removed:"done", rejected:"fail", not_possible:"done", error:"fail"}[fa.status] || "done";
+  return stage(3, state, "First aid", fa.applied_at ? "live " + dur(fa.applied_at - inc.opened_at) + " after detection" : null, lede, body);
+}
+
 function repairStage(inc){
   var atts = inc.attempts || [];
-  if (!atts.length) return stage(3, stateOf(inc, "decided", "remedied"), "Repaired", null,
-    (inc.decision || {}).remedy === "escalate" ? "No safe automatic fix for this cause: Medic hands it to a human with the evidence." : "Waiting for the diagnosis.", null);
+  if (!atts.length) return stage(4, stateOf(inc, "decided", "remedied"), "Repaired", null,
+    (inc.decision || {}).remedy === "escalate" ? "No safe automatic fix for this cause: Medic hands it to a human with the evidence." :
+      reached(inc, "decided") ? "Medic is writing candidate fixes and verifying them." : "Waiting for the diagnosis.", null);
   var body = atts.map(function(a){
     var cands = a.candidates || [];
     var tbl = cands.length ? h("div", {class:"tablewrap"}, h("table", null,
@@ -621,7 +656,7 @@ function repairStage(inc){
   });
   var acc = atts.filter(function(a){ return a.accepted; }).pop();
   var n = atts.reduce(function(s, a){ return s + Math.max(1, (a.candidates || []).length); }, 0);
-  return stage(3, stateOf(inc, "decided", "remedied"), "Repaired", took(inc, "decided", "remedied"),
+  return stage(4, stateOf(inc, "decided", "remedied"), "Repaired", took(inc, "decided", "remedied"),
     acc ? (n > 1 ? n + " candidate fixes competed on the same eval; " : "") + "“" + acc.title + "” won and was verified on " + ((acc.metrics || {}).n || "?") + " runs at " + pct((acc.metrics || {}).pass_rate) + "."
         : "No candidate has been verified yet.", body);
 }
@@ -638,7 +673,7 @@ function canaryStage(inc){
   var c = inc.canary || {}, ro = c.rollout || (DATA.rollout && DATA.rollout.incident === inc.id ? DATA.rollout : null);
   var v = c.verdict, st = stateOf(inc, "canary", "deployed");
   if (!ro && !c.deployed) {
-    return stage(4, phaseT(inc, "remedied") && inc.phase !== "escalated" ? "now" : "pending", "Canary", null,
+    return stage(5, phaseT(inc, "remedied") && inc.phase !== "escalated" ? "now" : "pending", "Canary", null,
       inc.phase === "escalated" ? "No fix to roll out." : "A verified fix first serves a share of real production traffic.", null);
   }
   var live = DATA.rollout && DATA.rollout.incident === inc.id ? DATA.rollout : null;
@@ -665,16 +700,16 @@ function canaryStage(inc){
     h("span", null, "Promoted ", sha(c.release), " at " + day(c.at) + " · " + liveStatus(c.release),
       v && v.detail ? h("span", {class:"muted", style:"font-weight:400"}, " · " + v.detail) : null)));
   else if (live) body.push(h("div", {class:"outcome warn"}, h("span", {class:"ic"}, "…"), h("span", null, "Collecting canary traces: " + live.canary_traces + " so far")));
-  return stage(4, st, "Canary", took(inc, "canary", "deployed"),
+  return stage(5, st, "Canary", took(inc, "canary", "deployed"),
     "Verification uses the eval set; production is bigger. So the fix serves part of real traffic first, and Medic compares it with the healthy baseline before promoting it, or rolls it back.", body);
 }
 
 function healStage(inc){
   var m = (inc.monitor || {}).window || {};
-  if (inc.phase === "escalated") return stage(5, "fail", "Escalated to a human", null,
+  if (inc.phase === "escalated") return stage(6, "fail", "Escalated to a human", null,
     (inc.timeline || []).filter(function(e){ return e.phase === "escalated"; }).map(function(e){ return e.msg; }).pop() || "Medic could not heal this safely.", null);
   var done = inc.phase === "resolved";
-  return stage(5, done ? "done" : reached(inc, "deployed") ? "now" : "pending", "Healed", took(inc, "deployed", "resolved"),
+  return stage(6, done ? "done" : reached(inc, "deployed") ? "now" : "pending", "Healed", took(inc, "deployed", "resolved"),
     done ? "After promotion Medic kept watching: " + (m.n || 0) + " production traces at a " + pct(m.failure_rate) + " failure rate. Incident closed."
          : "After promotion Medic keeps watching production before closing the incident.", null);
 }

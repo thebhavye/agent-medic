@@ -25,24 +25,35 @@ def due(state: dict) -> bool:
     return not runs or time.time() - runs[-1]["at"] >= INTERVAL_S
 
 
+def evaluate(code_dir: Path, sha: str, first_aid: Path | None = None, tag: str = "canary") -> dict:
+    """Run the known-answer eval on `code_dir` at release `sha` and return the result.
+
+    The eval judges the code as it is: any first-aid bundle in Medic's own environment is
+    dropped. Pass `first_aid` to judge the release *with* that bundle applied instead."""
+    out = paths.MEDIC_DIR / "canary" / f"{time.strftime('%Y%m%d-%H%M%S')}-{sha[:8]}-{tag}.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [sys.executable, "-m", "target_agent.run_eval", "--cases", str(paths.CASES), "--out", str(out),
+           "--session", f"{tag}-{sha[:8]}-{out.stem}", "--tag", tag, "--tag", f"release:{sha[:12]}"]
+    env = {k: v for k, v in os.environ.items() if k not in ("MEDIC_CONTROL", "MEDIC_RELEASE")}
+    env.update(PYTHONPATH=str(code_dir), KB_URL=paths.KB_URL)
+    if first_aid is not None:
+        env.update(MEDIC_CONTROL=str(first_aid), MEDIC_RELEASE=sha[:12])
+    subprocess.run(cmd, cwd=code_dir, env=env, capture_output=True, timeout=1800)
+    if not out.exists():
+        return {"at": time.time(), "release": sha[:12], "error": f"{tag} eval did not produce results"}
+    cases = json.loads(out.read_text(encoding="utf-8"))["cases"]
+    m = from_cases(cases)
+    return {"at": time.time(), "release": sha[:12], "pass_rate": m.pass_rate, "error_rate": m.error_rate, "n": m.n,
+            "tool_calls_per_run": m.tool_calls_per_run, "tokens_per_run": m.tokens_per_run,
+            "failed": [{"id": c["id"], "question": c["question"], "answer": c["answer"][:300],
+                        "expect": c["expect"]} for c in cases if not c["passed"]]}
+
+
 def run(state: dict, log=print, code_dir: Path | None = None, sha: str | None = None) -> dict:
     """Run the known-answer eval on the deployed release, or on `code_dir` (e.g. a rollout candidate)."""
     code_dir = code_dir or paths.DEPLOY
     sha = sha or world.head()
-    out = paths.MEDIC_DIR / "canary" / f"{time.strftime('%Y%m%d-%H%M%S')}-{sha[:8]}.json"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    cmd = [sys.executable, "-m", "target_agent.run_eval", "--cases", str(paths.CASES), "--out", str(out),
-           "--session", f"canary-{sha[:8]}-{out.stem}", "--tag", "canary", "--tag", f"release:{sha[:12]}"]
-    env = {**os.environ, "PYTHONPATH": str(code_dir), "KB_URL": paths.KB_URL}
-    subprocess.run(cmd, cwd=code_dir, env=env, capture_output=True, timeout=1800)
-    if not out.exists():
-        record = {"at": time.time(), "release": sha[:12], "error": "canary eval did not produce results"}
-    else:
-        cases = json.loads(out.read_text(encoding="utf-8"))["cases"]
-        m = from_cases(cases)
-        record = {"at": time.time(), "release": sha[:12], "pass_rate": m.pass_rate, "n": m.n,
-                  "failed": [{"id": c["id"], "question": c["question"], "answer": c["answer"][:300],
-                              "expect": c["expect"]} for c in cases if not c["passed"]]}
+    record = evaluate(code_dir, sha)
     state.setdefault("canary", []).append(record)
     state["canary"] = state["canary"][-50:]
     if "pass_rate" in record:

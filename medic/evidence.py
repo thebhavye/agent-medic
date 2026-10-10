@@ -35,6 +35,7 @@ class TraceEvidence:
     # Every LLM and tool step in order: {"type", "name", "status", "model", "tokens",
     # "arg_keys", "input", "output_len", "error_type", "error"}. Localization diffs these.
     steps: list = field(default_factory=list)
+    first_aid: list = field(default_factory=list)      # runtime interventions in this trace, e.g. "function:read_doc"
 
     @property
     def non_answer(self) -> bool:
@@ -70,6 +71,10 @@ def collect(reader, trace: dict) -> TraceEvidence:
         fetched = dict(zip((s["spanId"] for s in wanted), pool.map(
             lambda s: reader.payload(trace["traceId"], s["spanId"], fields=fields[s["spanType"]]), wanted)))
     for span in spans:
+        if span["spanName"].startswith("medic:first_aid:"):
+            # The runtime's own CHAIN spans: what first aid did here. Not a step of the agent.
+            ev.first_aid.append(span["spanName"].split(":", 2)[2])
+            continue
         p = fetched.get(span["spanId"], {})
         failed = span["status"].upper() == "ERROR"
         err = (_json(p.get("error")) or {}) if failed else {}
