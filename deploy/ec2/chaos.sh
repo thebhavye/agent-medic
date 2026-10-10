@@ -24,8 +24,10 @@ PY="${MEDIC_PYTHON:-$APP_DIR/.venv/bin/python}"
 mkdir -p "$(dirname "$LOG_FILE")"
 stamp="$(date -u +%FT%TZ)"
 
-if ! "$PY" -m medic.cli world chaos normal >>"$LOG_FILE" 2>&1; then
-  rc=$?
+# Capture each status directly: after `if ! cmd`, $? is the negation's 0, not cmd's code.
+"$PY" -m medic.cli world chaos normal >>"$LOG_FILE" 2>&1
+rc=$?
+if [ "$rc" -ne 0 ]; then
   echo "== $stamp reset to normal FAILED (exit $rc); leaving the world as-is ==" >>"$LOG_FILE"
   exit 1
 fi
@@ -33,8 +35,9 @@ echo "== $stamp chaos window (every ${INTERVAL_HOURS}h): restored normal ==" >>"
 
 pick="${SCENARIOS[${CHAOS_INDEX:-$((RANDOM % ${#SCENARIOS[@]}))}]}"
 # shellcheck disable=SC2086
-if ! $PY -m medic.cli $pick >>"$LOG_FILE" 2>&1; then
-  rc=$?
+$PY -m medic.cli $pick >>"$LOG_FILE" 2>&1
+rc=$?
+if [ "$rc" -ne 0 ]; then
   echo "== $stamp FAILED to apply: $pick (exit $rc; reset had succeeded, see above) ==" >>"$LOG_FILE"
   exit 1
 fi

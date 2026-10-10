@@ -73,8 +73,8 @@ each line below matches before trusting it:
 ```bash
 scp -i agent-medic-key.pem deploy/ec2/setup.sh agent-medic-deploy ubuntu@$EC2_IP:/tmp/
 ssh -i agent-medic-key.pem ubuntu@$EC2_IP
-sudo install -m 600 -o root -g root /tmp/agent-medic-deploy /root/.ssh/id_agent_medic
 sudo mkdir -p /root/.ssh && sudo chmod 700 /root/.ssh
+sudo install -m 600 -o root -g root /tmp/agent-medic-deploy /root/.ssh/id_agent_medic
 ssh-keyscan -t rsa,ecdsa,ed25519 github.com > /tmp/gh.pub
 ssh-keygen -lf /tmp/gh.pub   # compare against the fingerprints in GitHub's docs
 cat /tmp/gh.pub | sudo tee -a /root/.ssh/known_hosts > /dev/null
@@ -85,10 +85,15 @@ sudo bash /tmp/setup.sh
 ```
 
 `setup.sh` without `GITHUB_TOKEN` clones with exactly that key
-(`ssh -i /root/.ssh/id_agent_medic -o IdentitiesOnly=yes -o BatchMode=yes`)
-and fails with an actionable error if the key is missing or rejected —
-it never probes with `ssh -T` status codes and never continues past a
-failed clone.
+(`ssh -i /root/.ssh/id_agent_medic -o IdentitiesOnly=yes -o BatchMode=yes
+-o StrictHostKeyChecking=yes`) and fails with an actionable error if the key
+is missing or rejected, or if github.com is not in `known_hosts`. It never
+trusts an unverified host key, never probes with `ssh -T` status codes and
+never continues past a failed clone.
+
+Re-running `setup.sh` later updates the repo with the same authentication:
+pass `GITHUB_TOKEN` again if the box was set up with a token, or keep the
+deploy key in place.
 
 ## 3. Copy `.env` (never commit it)
 
@@ -105,16 +110,17 @@ ssh -i agent-medic-key.pem ubuntu@$EC2_IP \
 
 ```bash
 ssh -i agent-medic-key.pem ubuntu@$EC2_IP
-sudo systemctl start medic-kb medic-traffic medic-watch medic-dashboard
+sudo systemctl start medic-kb medic-traffic medic-watch medic-dashboard medic-chaos.timer
 sudo /opt/agent-medic/deploy/ec2/status.sh
 ```
 
 - Dashboard: `http://<EC2_IP>:8790` (give traffic + watch ~2 minutes first).
 - Logs: `journalctl -u medic-watch -f`, or any unit in `status.sh`.
-- Chaos log: `/opt/agent-medic/.medic/logs/chaos.log`. `setup.sh` already
-  started the timer (`systemctl enable --now medic-chaos.timer`): first break
-  ~30 min after boot, then every 2 hours (`OnBootSec=30min`,
-  `OnUnitActiveSec=2h` in `systemd/medic-chaos.timer`). Confirm with
+- Chaos log: `/opt/agent-medic/.medic/logs/chaos.log`. `setup.sh` only enables
+  the timer; the start command above starts it, after `.env` is in place
+  (starting it earlier could break the world before the services run). Then
+  every 2 hours (`OnUnitActiveSec=2h` in `systemd/medic-chaos.timer`; on a
+  box up for over 30 minutes the first break comes right away). Confirm with
   `systemctl list-timers medic-chaos.timer`. A failed chaos run exits nonzero,
   so it shows up in `journalctl -u medic-chaos` — a merely active timer does
   not mean chaos has run; check the log.

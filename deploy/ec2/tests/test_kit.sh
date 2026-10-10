@@ -11,8 +11,8 @@ FAIL=0
 ok() { PASS=$((PASS + 1)); echo "ok: $1"; }
 bad() { FAIL=$((FAIL + 1)); echo "FAIL: $1"; }
 assert_eq() { [ "$2" = "$3" ] && ok "$1" || bad "$1 (want [$2], got [$3])"; }
-assert_contains() { grep -qF "$2" "$3" && ok "$1" || bad "$1 (missing [$2] in $3)"; }
-assert_not_contains() { grep -qF "$2" "$3" && bad "$1 (forbidden [$2] in $3)" || ok "$1"; }
+assert_contains() { grep -qF -- "$2" "$3" && ok "$1" || bad "$1 (missing [$2] in $3)"; }
+assert_not_contains() { grep -qF -- "$2" "$3" && bad "$1 (forbidden [$2] in $3)" || ok "$1"; }
 
 echo "== syntax =="
 for f in setup.sh chaos.sh status.sh; do
@@ -24,7 +24,8 @@ assert_not_contains "no token in clone URL" "x-access-token:" "$KIT/setup.sh"
 assert_not_contains "no token interpolation into URL" 'GITHUB_TOKEN}@' "$KIT/setup.sh"
 assert_contains "credential helper used" "credential.helper=" "$KIT/setup.sh"
 assert_contains "helper cleaned by trap" "trap " "$KIT/setup.sh"
-assert_contains "helper file locked down" "chmod 0600" "$KIT/setup.sh"
+assert_contains "helper is owner-only and executable" 'chmod 0700 "$helper"' "$KIT/setup.sh"
+assert_not_contains "helper not left non-executable" 'chmod 0600 "$helper"' "$KIT/setup.sh"
 assert_contains "helper dir locked down" "chmod 0700" "$KIT/setup.sh"
 assert_contains "origin verified token-free" 'remote get-url origin' "$KIT/setup.sh"
 
@@ -32,11 +33,22 @@ echo "== ssh handling (static) =="
 assert_not_contains "no fragile ssh -T probe" "ssh -o BatchMode=yes -T" "$KIT/setup.sh"
 assert_contains "deploy key path documented" "/root/.ssh/id_agent_medic" "$KIT/setup.sh"
 assert_contains "ssh failure is actionable" "known_hosts (README step 2b)" "$KIT/setup.sh"
+assert_contains "unknown host keys are refused" "StrictHostKeyChecking=yes" "$KIT/setup.sh"
+assert_not_contains "no trust on first use" "accept-new" "$KIT/setup.sh"
+assert_contains "updates reuse the clone auth" 'git_auth -C "$APP_DIR" fetch' "$KIT/setup.sh"
+# README: the key directory must exist before the key is installed into it.
+mk="$(grep -n 'mkdir -p /root/.ssh' "$KIT/README.md" | head -1 | cut -d: -f1)"
+inst="$(grep -n 'install -m 600 -o root' "$KIT/README.md" | head -1 | cut -d: -f1)"
+[ -n "$mk" ] && [ -n "$inst" ] && [ "$mk" -lt "$inst" ] && ok "README creates /root/.ssh before installing the key" \
+  || bad "README creates /root/.ssh before installing the key"
 
 echo "== timer activation (static) =="
-assert_contains "timer started at setup" "enable --now medic-chaos.timer" "$KIT/setup.sh"
-assert_contains "README documents started timer" "enable --now medic-chaos.timer" "$KIT/README.md"
+assert_not_contains "setup does not start the timer before .env exists" "enable --now" "$KIT/setup.sh"
+assert_contains "setup enables the timer" "medic-dashboard medic-chaos.timer" "$KIT/setup.sh"
+assert_contains "setup's start command includes the timer" "start medic-kb medic-traffic medic-watch medic-dashboard medic-chaos.timer" "$KIT/setup.sh"
+assert_contains "README's start command includes the timer" "start medic-kb medic-traffic medic-watch medic-dashboard medic-chaos.timer" "$KIT/README.md"
 assert_contains "first run matches unit" "OnBootSec=30min" "$KIT/systemd/medic-chaos.timer"
+assert_contains "dashboard reachable from outside" "--host 0.0.0.0" "$KIT/systemd/medic-dashboard.service"
 
 echo "== token clone (functional, local repos only) =="
 # shellcheck disable=SC1090
@@ -62,6 +74,15 @@ else
   ok "failed clone returns nonzero"
 fi
 if [ -z "$(ls -A "$TMPDIR")" ]; then ok "helper temp dir cleaned on failure"; else bad "helper temp dir cleaned on failure"; fi
+# A local clone never asks for credentials, so ask git directly: this runs the
+# helper exactly as an HTTPS clone of the private repo would.
+cred="$(printf 'protocol=https\nhost=github.com\npath=thebhavye/agent-medic\n\n' \
+  | GITHUB_TOKEN=secret-token-xyz GIT_TERMINAL_PROMPT=0 git_with_token credential fill 2>/dev/null)"
+case "$cred" in *password=secret-token-xyz*) ok "helper runs and supplies the token";; *) bad "helper runs and supplies the token";; esac
+case "$cred" in *username=x-access-token*) ok "helper supplies the token username";; *) bad "helper supplies the token username";; esac
+if [ -z "$(ls -A "$TMPDIR")" ]; then ok "helper temp dir cleaned after credential use"; else bad "helper temp dir cleaned after credential use"; fi
+# Updates on an existing clone go through the same auth path.
+if GITHUB_TOKEN=secret-token-xyz git_auth -C "$WORK/clone" fetch -q origin; then ok "fetch through git_auth"; else bad "fetch through git_auth"; fi
 if SSH_KEY=/nonexistent/key clone_with_ssh "$WORK/none" 2>/dev/null; then
   bad "missing key returns nonzero"
 else
@@ -87,9 +108,10 @@ chaos_case() { # name reset_rc scenario_rc want_rc want_log... (log file asserti
   rm -rf "$dir"
 }
 chaos_case "reset+scenario ok" 0 0 0 "restored normal" "applied: world chaos schema_v2"
-chaos_case "scenario fails" 0 1 1 "restored normal" "FAILED to apply"
-chaos_case "reset fails" 1 0 1 "reset to normal FAILED"
-chaos_case "both fail" 1 1 1 "reset to normal FAILED"
+# Distinct exit codes (3, 4) prove the log records the command's real status.
+chaos_case "scenario fails" 0 3 1 "restored normal" "FAILED to apply" "(exit 3;"
+chaos_case "reset fails" 4 0 1 "reset to normal FAILED (exit 4)"
+chaos_case "both fail" 1 1 1 "reset to normal FAILED (exit 1)"
 # A failed reset must never claim success and must not run the scenario.
 dir="$(mktemp -d)"
 fake="$dir/fake-py"

@@ -12,35 +12,46 @@ SSH_KEY=/root/.ssh/id_agent_medic
 APP_USER=medic
 
 
-# Clone with a token without persisting it: git gets the credential through a
-# temporary helper script (0600, removed by trap), so origin stays token-free
-# and nothing lands in .git/config. Never echo the token or enable tracing here.
-clone_with_token() {
-  local dest="$1" cred_dir helper rc
+# Run one git command with the token, persisting none of it: git gets the
+# credential from a temporary helper script (owner-only, executable, removed
+# afterwards). The script reads the token from the environment, so the token is
+# never written to disk, the clone URL, or .git/config. Never echo the token or
+# enable tracing here.
+git_with_token() {
+  local cred_dir helper rc
   cred_dir="$(mktemp -d)" || return 1
   chmod 0700 "$cred_dir"
   helper="$cred_dir/helper.sh"
   printf '#!/bin/sh\nprintf "username=%%s\\n" "x-access-token"\nprintf "password=%%s\\n" "$MEDIC_GIT_TOKEN"\n' > "$helper"
-  chmod 0600 "$helper"
-  cleanup_token_helper() { rm -rf "$cred_dir"; }
-  trap cleanup_token_helper RETURN INT TERM
-  MEDIC_GIT_TOKEN="$GITHUB_TOKEN" git -c "credential.helper=$helper" clone "$REPO_URL" "$dest"
+  chmod 0700 "$helper"                       # git executes the helper, so it needs +x
+  trap 'rm -rf "$cred_dir"' INT TERM
+  MEDIC_GIT_TOKEN="$GITHUB_TOKEN" git -c credential.helper= -c "credential.helper=$helper" "$@"
   rc=$?
-  trap - RETURN INT TERM
-  cleanup_token_helper
+  trap - INT TERM
+  rm -rf "$cred_dir"
   return "$rc"
 }
 
 
-# Clone over SSH with the dedicated deploy key. No exit-status probing:
-# GitHub's `ssh -T` test can exit 1 on success, so the clone itself is the test.
-# Returns 2 when the key file is absent, git's status otherwise.
-clone_with_ssh() {
-  local dest="$1"
+# Run one git command over SSH with the dedicated deploy key. GitHub's host key
+# must already be in /root/.ssh/known_hosts (README step 2b): an unknown host
+# stops here instead of being trusted on first use. Returns 2 without the key.
+git_with_ssh() {
   [ -f "$SSH_KEY" ] || return 2
-  GIT_SSH_COMMAND="ssh -i $SSH_KEY -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new" \
-    git clone "$REPO_SSH_URL" "$dest"
+  GIT_SSH_COMMAND="ssh -i $SSH_KEY -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes" \
+    git "$@"
 }
+
+
+# Every command that talks to GitHub (clone, fetch, pull) goes through here, so
+# re-running setup on an existing box authenticates the same way the clone did.
+git_auth() {
+  if [ -n "${GITHUB_TOKEN:-}" ]; then git_with_token "$@"; else git_with_ssh "$@"; fi
+}
+
+
+clone_with_token() { git_with_token clone "$REPO_URL" "$1"; }
+clone_with_ssh() { git_with_ssh clone "$REPO_SSH_URL" "$1"; }
 
 
 clone_repo() {
@@ -94,8 +105,11 @@ if [ ! -d "$APP_DIR/.git" ]; then
   clone_repo "$APP_DIR"
 else
   echo "repo exists at $APP_DIR, updating to latest main."
-  git -C "$APP_DIR" fetch origin
-  git -C "$APP_DIR" pull --ff-only origin main || echo "pull skipped (local changes?); continuing."
+  git_auth -C "$APP_DIR" fetch origin || {
+    echo "fetch failed: re-run with the same auth the box was set up with (GITHUB_TOKEN or the deploy key)." >&2
+    exit 1
+  }
+  git -C "$APP_DIR" merge --ff-only origin/main || echo "update skipped (local changes?); continuing."
 fi
 
 if ! id -u "$APP_USER" >/dev/null 2>&1; then
@@ -113,9 +127,10 @@ chown -R "$APP_USER:$APP_USER" "$APP_DIR/.medic"
 chmod +x "$APP_DIR/deploy/ec2/chaos.sh" "$APP_DIR/deploy/ec2/status.sh"
 cp "$APP_DIR/deploy/ec2/systemd/"*.service "$APP_DIR/deploy/ec2/systemd/"*.timer /etc/systemd/system/
 systemctl daemon-reload
-systemctl enable medic-world-init medic-kb medic-traffic medic-watch medic-dashboard
-systemctl enable --now medic-chaos.timer
+# Enable only: nothing starts until .env is in place. In particular the chaos
+# timer must not start here; on a box up for over 30 minutes OnBootSec has
+# already passed, so it would break the world before the services exist.
+systemctl enable medic-world-init medic-kb medic-traffic medic-watch medic-dashboard medic-chaos.timer
 
-echo "setup done. The chaos timer is running (first break ~30 min after boot, then every 2h)."
-echo "Next: copy .env to $APP_DIR/.env (see README), then:"
-echo "  systemctl start medic-kb medic-traffic medic-watch medic-dashboard"
+echo "setup done. Next: copy .env to $APP_DIR/.env (see README), then:"
+echo "  systemctl start medic-kb medic-traffic medic-watch medic-dashboard medic-chaos.timer"
