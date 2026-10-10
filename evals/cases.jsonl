@@ -1,0 +1,8 @@
+{"id": "pilot-output", "question": "Where is the Halcyon pilot plant located, and how much annual output did it deliver in 2025?", "expect": [["Narvik"], ["412"]]}
+{"id": "chief-engineer", "question": "Who is Halcyon's chief engineer and in what year were they appointed?", "expect": [["Okafor"], ["2024"]]}
+{"id": "cycle-life", "question": "What chemistry do Halcyon cells use and what cycle life did they reach in testing?", "expect": [["sodium-iron", "sodium iron"], ["9,200", "9200", "9 200"]]}
+{"id": "series-b", "question": "How much did Halcyon's Series B raise and who led it?", "expect": [["86"], ["Fjord Ventures"]]}
+{"id": "cathode", "question": "Who supplies Halcyon's cathode material and what is the current lead time?", "expect": [["Kestrel"], ["11 weeks", "11-week", "eleven weeks"]]}
+{"id": "second-plant", "question": "What is the name of Halcyon's second plant and what annual capacity is it designed for?", "expect": [["Bergen-2", "Bergen 2"], ["1.6"]]}
+{"id": "utility-partner", "question": "Which utility is Halcyon's lead partner and how large is its pilot installation?", "expect": [["Nordhavn"], ["20 MW", "20MW", "20-MW", "20 megawatt", "20-megawatt"]]}
+{"id": "safety-recycling", "question": "Which fire test did Halcyon systems pass, and what share of iron does recycling recover?", "expect": [["9540A"], ["94"]]}
