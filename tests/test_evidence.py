@@ -106,3 +106,11 @@ def test_window_metrics():
     assert w["non_answer_rate"] == pytest.approx(1 / 3)
     assert w["tokens_per_run"] == 100.0 and w["tool_calls_per_run"] == 3.0
     assert window([]) == {"n": 0}
+
+
+def test_window_averages_across_traces_and_counts_loops():
+    w = window([ev(tokens=100, tool_calls=2), ev(tokens=300, tool_calls=4, repeated_calls=2),
+                ev(tokens=500, tool_calls=9, repeated_calls=1), ev(tokens=700, tool_calls=1)])
+    assert w["tokens_per_run"] == pytest.approx(400.0)        # not the first trace's 100
+    assert w["tool_calls_per_run"] == pytest.approx(4.0)
+    assert w["repeated_call_rate"] == pytest.approx(0.5)      # share of traces that repeated a call

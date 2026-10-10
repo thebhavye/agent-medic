@@ -59,6 +59,37 @@ def test_run_records_pass_rate_and_baseline(tmp_path, monkeypatch):
     assert len(state["canary"]) == 1
 
 
+def bad_case(case_id):
+    return {**good_case(case_id), "passed": False, "question": f"question {case_id}?",
+            "answer": "Halcyon builds storage. " * 20, "expect": [["Narvik"], ["412"]]}
+
+
+def test_run_records_failed_questions_and_a_fractional_rate(tmp_path, monkeypatch):
+    stub_run(monkeypatch, tmp_path, [good_case("q1"), good_case("q2"), good_case("q3"), bad_case("q4")])
+    state: dict = {}
+    record = canary.run(state, log=lambda *a: None)
+    assert record["pass_rate"] == 0.75 and record["n"] == 4
+    assert [f["id"] for f in record["failed"]] == ["q4"]
+    failed = record["failed"][0]
+    assert failed["question"] == "question q4?" and failed["expect"] == [["Narvik"], ["412"]]
+    assert len(failed["answer"]) == 300                       # long answers are cut for the state file
+
+
+def test_existing_baseline_is_never_lowered(tmp_path, monkeypatch):
+    stub_run(monkeypatch, tmp_path, [good_case("q1"), good_case("q2"), good_case("q3"), bad_case("q4")])
+    state: dict = {"canary_baseline": 1.0}
+    canary.run(state, log=lambda *a: None)
+    assert state["canary_baseline"] == 1.0                    # a 0.75 run must not become the new reference
+
+
+def test_low_first_run_does_not_become_the_baseline(tmp_path, monkeypatch):
+    stub_run(monkeypatch, tmp_path, [good_case("q1"), bad_case("q2")])
+    state: dict = {}
+    record = canary.run(state, log=lambda *a: None)
+    assert record["pass_rate"] == 0.5
+    assert state.get("canary_baseline") is None               # an unhealthy run is no reference for "healthy"
+
+
 def test_run_without_results_records_error(tmp_path, monkeypatch):
     monkeypatch.setattr(world, "head", lambda: "abc123456789")
     monkeypatch.setattr(paths, "MEDIC_DIR", tmp_path)

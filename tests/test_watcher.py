@@ -9,16 +9,21 @@ from medic.evidence import TraceEvidence
 from medic.watcher import Watcher, compare
 
 
-@pytest.mark.parametrize("metric,threshold", [
-    ("tool_error_rate", 0.25), ("failure_rate", 0.25), ("repeated_call_rate", 0.5)])
-def test_abs_rules_fire_at_threshold(metric, threshold):
-    assert [s.name for s in compare({metric: 0.0}, {metric: threshold})]
+def fields(signals):
+    return [(s.name, s.metric, s.baseline, s.current) for s in signals]
+
+
+@pytest.mark.parametrize("name,metric,threshold", [
+    ("tool_errors", "tool_error_rate", 0.25), ("failures", "failure_rate", 0.25),
+    ("loops", "repeated_call_rate", 0.5)])
+def test_abs_rules_fire_at_threshold(name, metric, threshold):
+    assert fields(compare({metric: 0.0}, {metric: threshold})) == [(name, metric, 0.0, threshold)]
     assert compare({metric: 0.1}, {metric: 0.1 + threshold - 0.01}) == []
 
 
-@pytest.mark.parametrize("metric", ["tool_calls_per_run", "tokens_per_run"])
-def test_ratio_rules_fire_at_threshold(metric):
-    assert [s.name for s in compare({metric: 100.0}, {metric: 150.0})]
+@pytest.mark.parametrize("name,metric", [("tool_calls", "tool_calls_per_run"), ("cost", "tokens_per_run")])
+def test_ratio_rules_fire_at_threshold(name, metric):
+    assert fields(compare({metric: 100.0}, {metric: 150.0})) == [(name, metric, 100.0, 150.0)]
     assert compare({metric: 100.0}, {metric: 149.9}) == []
 
 
