@@ -32,12 +32,18 @@ class Medic:
         added = self.watcher.poll()
         if added:
             self.log(f"[medic] {added} new production traces")
+        self._refresh_standby()
         open_now = incidents.open_incidents()
         for inc in open_now:
             self.step(inc)
         if open_now:
             return
         signals, current = self.watcher.check()
+        # The runtime healing a request by itself is an incident too: the code is still broken.
+        recent = self.watcher.recent()
+        healed = [e for e in recent if any(f.startswith("auto:") for f in e.first_aid)]
+        if healed:
+            signals = [*signals, Signal("self_healed", "self_healed_rate", 0.0, len(healed) / len(recent))]
         # Wrong-but-confident answers leave no trace signal; the canary eval catches them.
         if self.watcher.state.get("baseline") and canary.due(self.watcher.state):
             canary.run(self.watcher.state, self.log)
@@ -47,6 +53,26 @@ class Medic:
                 signals = [*signals, Signal(**quality)]
         if signals and not self._recently_escalated(signals):
             self.open(signals)
+
+    def _refresh_standby(self) -> None:
+        """Keep the runtime armed: the last known good of every registered part, from the
+        healthy release, ready for the runtime to engage by itself."""
+        healthy = self.watcher.state.get("healthy_release")
+        if not healthy:
+            return
+        try:
+            current = first_aid.current_standby()
+            fresh = (current and current.get("good_release") == healthy[:12]
+                     and time.time() - float(current.get("issued_at") or 0) < first_aid.STANDBY_TTL_S / 2)
+            if fresh:
+                return
+            body = first_aid.standby(paths.DEPLOY, world.git("rev-parse", healthy), world.head(),
+                                     baseline=self.watcher.state.get("baseline"))
+            first_aid.write(first_aid.standby_path(), body)
+            self.log(f"[medic] runtime armed: last known good of {len(body['functions']) + len(body['values'])} "
+                     f"parts from {healthy[:8]}")
+        except Exception as exc:  # noqa: BLE001 - arming is best effort; detection still works
+            self.log(f"[medic] could not arm the runtime: {type(exc).__name__}: {exc}")
 
     def _recently_escalated(self, signals) -> bool:
         """Don't reopen the same problem every tick while a human handles an escalation."""
@@ -71,6 +97,13 @@ class Medic:
         inc = Incident(signals=[s.__dict__ for s in signals], release=world.head(),
                        healthy_release=self._healthy_release(), trace_ids=[e.trace_id for e in recent])
         inc.note("open", "; ".join(s.describe() for s in signals), self.log)
+        healed = sorted({f.split(":", 1)[1] for e in recent for f in e.first_aid if f.startswith("auto:")} - {"engaged"})
+        if healed:
+            # The runtime already stepped in on its own; Medic's targeted first aid may refine it.
+            inc.first_aid = {"status": "auto", "what": ", ".join(healed) + " from the last known good release",
+                             "functions": healed, "applied_at": time.time()}
+            inc.note("first_aid", f"the runtime healed requests by itself: running {', '.join(healed)} "
+                                  "from the last known good release", self.log)
         incidents.save(inc)
         return inc
 

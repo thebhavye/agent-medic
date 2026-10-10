@@ -76,7 +76,7 @@ def _answer(question: str, provider) -> dict:
         if turn.stop == "max_tokens":
             return finish("error", error="hit max_tokens")
         if not turn.tool_calls:
-            return finish("ok", answer=turn.text)
+            return finish("ok", answer=medic.answer(turn.text))   # a non-answer counts as a failed request
 
         transcript.append({"role": "assistant", "text": turn.text, "tool_calls": turn.tool_calls, "raw": turn.raw})
         for call in turn.tool_calls:

@@ -86,6 +86,17 @@ def test_values_are_found_where_they_are_defined_and_pinned_as_literals(repo):
     assert p["values"] == {"prompt": "Answer from the docs. Cite figures."}       # implicit concatenation
 
 
+def test_standby_holds_the_good_version_of_everything_the_live_code_registers(repo):
+    root, healthy = repo
+    live = commit(root, "break things", **{"app/tools.py": TOOLS.replace('["query"]', '["q"]').replace(
+        'return doc["body"]', 'return doc["body"][:300]')})
+    body = first_aid.standby(root, healthy, live, files=FILES)
+    assert body["good_release"] == healthy[:12]
+    assert set(body["functions"]) == {"read"} and '[:300]' not in body["functions"]["read"]["source"]
+    assert body["values"]["schemas"] == [{"name": "search", "params": ["query"]}]
+    assert body["values"]["prompt"] == "Answer from the docs. Cite figures."
+
+
 def test_unregistered_change_gets_no_first_aid(repo):
     root, healthy = repo
     culprit = commit(root, "helper", **{"app/tools.py": TOOLS.replace("return x", "return -x")})

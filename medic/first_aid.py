@@ -169,6 +169,53 @@ def payload(incident_id: str, release: str, p: dict) -> dict:
             "breakers": p.get("breakers") or {}, "fallback_models": p.get("fallback_models") or []}
 
 
+# -- standby: what the runtime may engage by itself ---------------------------------------
+
+STANDBY_TTL_S = 24 * 3600
+
+
+def standby_path() -> Path:
+    return paths.MEDIC_DIR / "control" / "standby.json"
+
+
+def standby(root: Path, good: str, live: str, files: list[str] | None = None, baseline: dict | None = None) -> dict:
+    """The last known good version of every part the live code registers, from release `good`.
+
+    The runtime holds it for any other release and switches the parts that differ to it the
+    moment requests start failing; Medic's own diagnosis follows and narrows it to the culprit.
+    With the healthy baseline it also carries a tool-call budget: a request far past it counts
+    as failed, so a cost regression engages the standby as well."""
+    files = files or paths.AGENT_FILES
+    regs = registered({f: t for f in files if (t := _show(root, live, f))})
+    functions, values = {}, {}
+    for name, reg in sorted(regs.items()):
+        found = _find(root, good, reg, files)
+        if not found:
+            continue                    # new since the good release: nothing to fall back to
+        if reg["kind"] == "function":
+            functions[name] = {"source": found[0], "from_release": good}
+        else:
+            try:
+                values[name] = ast.literal_eval(found[1])
+            except (ValueError, SyntaxError):
+                pass
+    limits = {}
+    calls = (baseline or {}).get("tool_calls_per_run")
+    if calls:
+        limits["tool_calls_per_request"] = max(round(calls * 1.5), round(calls) + 2)
+    now = time.time()
+    return {"good_release": good[:12], "issued_at": now, "expires_at": now + STANDBY_TTL_S,
+            "functions": functions, "values": values, "limits": limits}
+
+
+def current_standby() -> dict | None:
+    try:
+        doc = json.loads(standby_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return doc["payload"] if bundle.verify(doc, _key()) else None
+
+
 # -- publishing ---------------------------------------------------------------------------
 
 def write(path: Path, body: dict) -> Path:

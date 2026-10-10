@@ -7,6 +7,10 @@ Environment:
                            bundle must be signed. It is never sent anywhere.
     MEDIC_CONTROL_TOKEN    optional bearer token for fetching a remote bundle (HTTPS, or HTTP to loopback)
     MEDIC_FALLBACK_MODELS  comma-separated models to try when the configured one is unavailable
+    MEDIC_STANDBY          path or URL of the standby bundle: the last known good version of every
+                           registered part, which the runtime engages by itself (armed mode)
+    MEDIC_RUNTIME_STATE    optional file shared by this machine's processes, so one engagement
+                           protects every worker of the release
 """
 
 import ast
@@ -14,11 +18,14 @@ import contextlib
 import contextvars
 import functools
 import hashlib
+import inspect
 import json
 import os
 import re
+import textwrap
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -37,21 +44,44 @@ MODEL_UNAVAILABLE = re.compile(
     r"\b429\b|quota|rate.?limit|resource_exhausted|overloaded|\b503\b", re.I)
 
 
+# Armed mode: the runtime holds the last known good version of every registered part (the
+# standby bundle) and switches the parts that changed to it by itself when requests start
+# failing in a way code causes. No round trip to Medic: healing takes a few failed requests.
+TRIP_WINDOW = 6           # recent requests the runtime judges
+TRIP_FAILURES = 3         # code-shaped failures among them that engage the standby
+ENGAGE_TTL_S = 2 * 3600   # an engagement this old is dropped: Medic should have taken over
+NOT_CODE_COOLDOWN_S = 600  # after a standby didn't help, don't try again for this long
+
+NON_ANSWER = re.compile(r"could not|couldn't|unable to|does not (provide|contain|have|include)|"
+                        r"no information|not available|no documents|cannot find|can't find", re.I)
+
+
 class FirstAidError(RuntimeError):
     """Raised instead of calling a tool the runtime has cut off; the agent reports it to the model."""
 
 
 _lock = threading.Lock()
-_cache = {"at": 0.0, "source": None, "payload": None}
+_cache: dict = {}                  # env var -> {"at", "source", "payload"}
 _surfaces: dict = {}               # name -> original function
 _values: set = set()
+_defaults: dict = {}               # value name -> the value the live code passes
 _compiled: dict = {}               # (name, source hash) -> patched function
 _breakers: dict = {}               # tool -> {"failures": n, "open_until": t}
 _log: list = []
+_outcomes: list = []               # [(failed, engaged)] for recent requests
+_local_state: dict = {}            # engagement when no shared state file is configured
 _request = contextvars.ContextVar("medic_request", default=None)
 
 
 # -- the bundle ---------------------------------------------------------------------------
+
+class _RefuseRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(req.full_url, code, "redirects are refused for first-aid bundles", headers, fp)
+
+
+_NO_REDIRECTS = urllib.request.build_opener(_RefuseRedirect)
+
 
 def _remote_allowed(source: str) -> bool:
     """HTTPS anywhere; plain HTTP only to this machine."""
@@ -66,7 +96,8 @@ def _read(source: str, key: str | None) -> dict | None:
         # The signing key never leaves this process; fetching uses its own optional token.
         token = os.environ.get("MEDIC_CONTROL_TOKEN")
         req = urllib.request.Request(source, headers={"Authorization": f"Bearer {token}"} if token else {})
-        with urllib.request.urlopen(req, timeout=3) as resp:
+        # No redirects: urllib would forward the token to wherever the redirect points.
+        with _NO_REDIRECTS.open(req, timeout=3) as resp:
             doc = json.loads(resp.read().decode("utf-8"))
     else:
         with open(source, encoding="utf-8") as f:
@@ -74,27 +105,47 @@ def _read(source: str, key: str | None) -> dict | None:
     return doc["payload"] if _bundle.verify(doc, key) else None
 
 
-def _payload() -> dict | None:
-    """The bundle that applies to this process right now, or None."""
-    source = os.environ.get("MEDIC_CONTROL")
+def _load(env: str) -> dict | None:
+    """The verified payload of the bundle named by an environment variable (cached a few seconds)."""
+    source = os.environ.get(env)
     if not source:
         return None
     now = time.time()
     with _lock:
-        if _cache["source"] == source and now - _cache["at"] < CACHE_S:
-            payload = _cache["payload"]
-        else:
-            try:
-                payload = _read(source, os.environ.get("MEDIC_RUNTIME_KEY") or None)
-            except (OSError, ValueError, KeyError):
-                payload = None          # no bundle, unreadable or tampered: run unaided
-            _cache.update(at=now, source=source, payload=payload)
+        entry = _cache.get(env)
+        if entry and entry["source"] == source and now - entry["at"] < CACHE_S:
+            return entry["payload"]
+    try:
+        payload = _read(source, os.environ.get("MEDIC_RUNTIME_KEY") or None)
+    except (OSError, ValueError, KeyError):
+        payload = None                  # no bundle, unreadable or tampered: run unaided
+    with _lock:
+        _cache[env] = {"at": now, "source": source, "payload": payload}
+    return payload
+
+
+def _release() -> str:
+    return (os.environ.get("MEDIC_RELEASE") or "")[:12]
+
+
+def _payload() -> dict | None:
+    """Medic's targeted first aid for this release, or None."""
+    payload = _load("MEDIC_CONTROL")
     if not payload:
         return None
-    release = (os.environ.get("MEDIC_RELEASE") or "")[:12]
-    if not release or str(payload.get("release", ""))[:12] != release:
+    if not _release() or str(payload.get("release", ""))[:12] != _release():
         return None                     # first aid treats one release; a new deploy outgrows it
-    if float(payload.get("expires_at") or 0) < now:
+    if float(payload.get("expires_at") or 0) < time.time():
+        return None
+    return payload
+
+
+def _standby() -> dict | None:
+    """The last known good versions, held for any release other than the good one."""
+    payload = _load("MEDIC_STANDBY")
+    if not payload or not _release() or str(payload.get("good_release", ""))[:12] == _release():
+        return None
+    if float(payload.get("expires_at") or 0) < time.time():
         return None
     return payload
 
@@ -102,10 +153,138 @@ def _payload() -> dict | None:
 def reset() -> None:
     """Forget cached state (tests, or after changing the environment)."""
     with _lock:
-        _cache.update(at=0.0, source=None, payload=None)
+        _cache.clear()
         _compiled.clear()
         _breakers.clear()
         _log.clear()
+        _outcomes.clear()
+        _local_state.clear()
+        _defaults.clear()
+
+
+# -- armed mode: engagement, shared by every process of this release on the machine -----
+
+def _state_path() -> str | None:
+    return os.environ.get("MEDIC_RUNTIME_STATE") or None
+
+
+def _read_state() -> dict:
+    path = _state_path()
+    if not path:
+        return dict(_local_state)
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_state(state: dict) -> None:
+    path = _state_path()
+    if not path:
+        _local_state.clear()
+        _local_state.update(state)
+        return
+    try:
+        tmp = f"{path}.{os.getpid()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+        os.replace(tmp, path)
+    except OSError:
+        pass                            # another process won the race; its write is as good
+
+
+def _engagement() -> dict | None:
+    """This release's live engagement: {"names", "good_release", "at"}, or None."""
+    entry = _read_state().get(_release())
+    standby = _standby()
+    if not entry or entry.get("status") != "engaged" or not standby:
+        return None
+    if entry.get("good_release") != str(standby.get("good_release", ""))[:12]:
+        return None                     # the standby moved on: that engagement is stale
+    if time.time() - float(entry.get("at") or 0) > ENGAGE_TTL_S:
+        return None
+    return entry
+
+
+def _normalized(source: str) -> str | None:
+    try:
+        tree = ast.parse(textwrap.dedent(source))
+    except SyntaxError:
+        return None
+    defs = [n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    if len(defs) != 1:
+        return None
+    defs[0].decorator_list = []
+    return ast.dump(defs[0])
+
+
+def _changed_since_good(standby: dict) -> list[str]:
+    """Registered parts whose live version differs from the last known good one."""
+    changed = []
+    for name, patch in (standby.get("functions") or {}).items():
+        original = _surfaces.get(name)
+        if original is None:
+            continue
+        try:
+            live = _normalized(inspect.getsource(original))
+        except (OSError, TypeError):
+            continue
+        if live is not None and live != _normalized(patch.get("source", "")):
+            changed.append(name)
+    for name, good in (standby.get("values") or {}).items():
+        if name in _defaults and _defaults[name] != good:
+            changed.append(name)
+    return sorted(changed)
+
+
+def _record_outcome(failed: bool) -> None:
+    """Judge the last few requests; engage the standby, or give it up if it didn't help."""
+    standby = _standby()
+    if standby is None:
+        return
+    engaged = _engagement()
+    with _lock:
+        _outcomes.append((failed, bool(engaged)))
+        del _outcomes[:-TRIP_WINDOW * 2]
+        window = [f for f, e in _outcomes if e == bool(engaged)][-TRIP_WINDOW:]
+    state = _read_state()
+    entry = state.get(_release()) or {}
+    if engaged is None:
+        if entry.get("status") == "not_code" and time.time() - float(entry.get("at") or 0) < NOT_CODE_COOLDOWN_S:
+            return
+        if sum(window) < TRIP_FAILURES:
+            return
+        names = _changed_since_good(standby)
+        if not names:
+            return                      # nothing changed since the good release: not a code problem
+        state[_release()] = {"status": "engaged", "names": names, "at": time.time(),
+                             "good_release": str(standby.get("good_release", ""))[:12]}
+        _write_state(state)
+        with _lock:
+            _outcomes.clear()
+        _report("auto", "engaged", f"{sum(window)} of the last {len(window)} requests failed; running "
+                                   f"{', '.join(names)} from {str(standby.get('good_release', ''))[:8]}")
+    elif len(window) >= TRIP_WINDOW and sum(window) >= TRIP_FAILURES:
+        # Still failing with the last known good in place: the cause isn't these parts.
+        state[_release()] = {"status": "not_code", "at": time.time()}
+        _write_state(state)
+        with _lock:
+            _outcomes.clear()
+        _report("auto", "released", "the last known good versions did not help; back to the live code")
+
+
+def _patch(kind: str, name: str):
+    """(how, patch) for a registered part: Medic's targeted first aid wins over the standby."""
+    targeted = ((_payload() or {}).get(kind) or {})
+    if name in targeted:
+        return ("function" if kind == "functions" else "value"), targeted[name]
+    engaged = _engagement()
+    if engaged and name in engaged.get("names", []):
+        standby = (_standby() or {}).get(kind) or {}
+        if name in standby:
+            return "auto", standby[name]
+    return None, None
 
 
 def status() -> dict:
@@ -168,14 +347,14 @@ def surface(name: str):
 
         @functools.wraps(fn)
         def call(*args, **kwargs):
-            patch = ((_payload() or {}).get("functions") or {}).get(name)
+            how, patch = _patch("functions", name)
             if patch:
                 try:
                     healthy = _compile(name, patch["source"], fn)
                 except Exception:  # noqa: BLE001 - incl. NameError while the def runs (a default or
                     healthy = None  # annotation the culprit removed): a bad patch runs the original
                 if healthy is not None:
-                    _report("function", name, f"running {name} from release {str(patch.get('from_release', ''))[:8]}")
+                    _report(how, name, f"running {name} from release {str(patch.get('from_release', ''))[:8]}")
                     return healthy(*args, **kwargs)
             return fn(*args, **kwargs)
         call.__medic_surface__ = name
@@ -186,10 +365,11 @@ def surface(name: str):
 def value(name: str, default):
     """A tunable read at call time (a prompt, a schema, a parameter); Medic may pin a known-good one."""
     _values.add(name)
-    pinned = (_payload() or {}).get("values") or {}
-    if name in pinned:
-        _report("value", name, f"{name} pinned to its last healthy value")
-        return pinned[name]
+    _defaults[name] = default
+    how, pinned = _patch("values", name)
+    if how:
+        _report(how, name, f"{name} pinned to its last healthy value")
+        return pinned
     return default
 
 
@@ -197,12 +377,33 @@ def value(name: str, default):
 
 @contextlib.contextmanager
 def request():
-    """One agent request: the scope for the loop guard and for reporting each fix once."""
-    token = _request.set({"calls": {}, "reported": set()})
+    """One agent request: the scope for the loop guard, for reporting each fix once, and the
+    unit armed mode judges (did this request fail the way code makes requests fail?)."""
+    scope = {"calls": {}, "reported": set(), "failed": False, "tool_calls": 0}
+    token = _request.set(scope)
     try:
         yield
+    except Exception:
+        scope["failed"] = True
+        raise
     finally:
         _request.reset(token)
+        try:
+            # A request that blew far past the healthy tool-call budget failed too: a cost regression.
+            budget = ((_standby() or {}).get("limits") or {}).get("tool_calls_per_request")
+            if budget and scope["tool_calls"] > budget:
+                scope["failed"] = True
+            _record_outcome(scope["failed"])
+        except Exception:  # noqa: BLE001 - judging must never break the agent
+            pass
+
+
+def answer(text: str) -> str:
+    """Tell the runtime what the agent answered: a non-answer counts as a failed request."""
+    scope = _request.get()
+    if scope is not None and (not text or NON_ANSWER.search(text)):
+        scope["failed"] = True
+    return text
 
 
 def guard_tool(name: str, args, run):
@@ -217,6 +418,7 @@ def guard_tool(name: str, args, run):
 
     scope = _request.get()
     if scope is not None:
+        scope["tool_calls"] += 1
         key = (name, json.dumps(args, sort_keys=True, default=str))
         seen = scope["calls"].get(key, 0)
         scope["calls"][key] = seen + 1
@@ -235,6 +437,8 @@ def guard_tool(name: str, args, run):
             state["failures"] += 1
             if state["failures"] >= BREAKER_FAILURES:
                 state["open_until"] = time.time() + BREAKER_COOLDOWN_S
+        elif scope is not None:
+            scope["failed"] = True      # code-shaped (bad args, a handler bug): what armed mode heals
         raise
     state["failures"] = 0
     return result

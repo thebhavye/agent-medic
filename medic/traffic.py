@@ -30,8 +30,12 @@ def run_batch(size: int, workers: int) -> dict:
                "--session", f"prod-{sha[:8]}-{stamp}", "--tag", "env:prod", "--tag", f"release:{sha[:12]}",
                "--workers", str(workers)]
         # Production reads Medic's first-aid bundle; it applies only to the release it was issued for.
+        # The standby arms the runtime to engage the last known good by itself; the state file
+        # lets one batch's engagement protect the next batch's process too.
         env = {**os.environ, "PYTHONPATH": str(code_dir), "KB_URL": paths.KB_URL,
-               "MEDIC_CONTROL": str(first_aid.bundle_path()), "MEDIC_RELEASE": sha[:12]}
+               "MEDIC_CONTROL": str(first_aid.bundle_path()), "MEDIC_RELEASE": sha[:12],
+               "MEDIC_STANDBY": str(first_aid.standby_path()),
+               "MEDIC_RUNTIME_STATE": str(first_aid.bundle_path().parent / "runtime-state.json")}
         subprocess.run(cmd, cwd=code_dir, env=env, capture_output=True, timeout=1800)
 
     try:

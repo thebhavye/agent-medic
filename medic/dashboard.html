@@ -333,7 +333,7 @@ function headline(){
   var ro = DATA.rollout, inc = openIncident(), last = (DATA.incidents || [])[0];
   if (ro) return {kind:"warn", tag:"Canary", text:"A Medic fix is serving " + pct(ro.share) + " of production",
     sub:"candidate " + short(ro.candidate) + " · " + (ro.canary_traces || 0) + " canary traces so far · started " + clock(ro.started)};
-  if (inc && faStatus(inc.first_aid) === "active") return {kind:"warn", tag:"First aid",
+  if (inc && ["active", "auto"].indexOf(faStatus(inc.first_aid)) >= 0) return {kind:"warn", tag:"First aid",
     text:"Users are being served by first aid while Medic prepares the cure",
     sub:["incident " + inc.id + " · " + (inc.first_aid.what || "") + " · opened ", since(inc.opened_at, "", " ago")]};
   if (inc) return {kind: inc.phase === "open" || inc.phase === "triaged" ? "bad" : "warn", tag:"Incident",
@@ -604,6 +604,7 @@ function firstAidStage(inc){
   var trial = fa.trial || {}, before = fa.before || {};
   var lede = {
     active: "Users are served by the culprit's healthy version, inside the running agent, while the cure is made.",
+    auto: "The agent healed itself: its runtime saw requests failing and switched the parts that changed to the last known good release, before Medic was even told.",
     removed: "Users were served by the culprit's healthy version until the cure went live; then Medic took it off.",
     rejected: "Medic tried a stand-in, but it did not restore answers on the broken release, so it was not applied.",
     not_possible: "Nothing the agent registered with Medic's runtime could stand in for the culprit; users wait for the cure.",
@@ -626,7 +627,7 @@ function firstAidStage(inc){
     h("span", null, "Expired at " + clock(fa.expires_at) + "; no longer applied")));
   if (status === "removed") body.push(h("div", {class:"outcome ok"}, h("span", {class:"ic"}, "✓"),
     h("span", null, "Removed at " + clock(fa.removed_at) + ": the cure is live")));
-  var state = {active:"now", removed:"done", rejected:"fail", not_possible:"done", expired:"fail", error:"fail"}[status] || "done";
+  var state = {active:"now", auto:"now", removed:"done", rejected:"fail", not_possible:"done", expired:"fail", error:"fail"}[status] || "done";
   return stage(3, state, "First aid", fa.applied_at ? "live " + dur(fa.applied_at - inc.opened_at) + " after detection" : null, lede, body);
 }
 

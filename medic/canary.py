@@ -34,7 +34,8 @@ def evaluate(code_dir: Path, sha: str, first_aid: Path | None = None, tag: str =
     out.parent.mkdir(parents=True, exist_ok=True)
     cmd = [sys.executable, "-m", "target_agent.run_eval", "--cases", str(paths.CASES), "--out", str(out),
            "--session", f"{tag}-{sha[:8]}-{out.stem}", "--tag", tag, "--tag", f"release:{sha[:12]}"]
-    env = {k: v for k, v in os.environ.items() if k not in ("MEDIC_CONTROL", "MEDIC_RELEASE")}
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("MEDIC_CONTROL", "MEDIC_RELEASE", "MEDIC_STANDBY", "MEDIC_RUNTIME_STATE")}
     env.update(PYTHONPATH=str(code_dir), KB_URL=paths.KB_URL)
     if first_aid is not None:
         env.update(MEDIC_CONTROL=str(first_aid), MEDIC_RELEASE=sha[:12])
