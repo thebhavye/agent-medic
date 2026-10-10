@@ -4,9 +4,13 @@ Each run: fresh deployment, healthy traffic until Medic freezes a baseline, one 
 
 | Scenario | Traffic model | Fixer model | Outcome | Cause | Remedy | Culprit | Detect | Resolve | Fix attempts | Pass |
 |---|---|---|---|---|---|---|---|---|---|---|
+| api_change | scripted | ollama_cloud | resolved ✅ | dependency_contract ✅ | adapt_client ✅ | - | 0m 48s | 6m 38s | 1 | ✅ |
 | bad_release | scripted | ollama_cloud | resolved ✅ | code_regression ✅ | code_fix ✅ | e3518e20 ✅ | 1m 37s | 5m 58s | 1 | ✅ |
+| healthy | scripted | ollama_cloud | no_incident ✅ | - | - | - | - | - | - | ✅ |
+| outage | scripted | ollama_cloud | escalated ✅ | dependency_outage ✅ | escalate ✅ | - | 1m 53s | 3m 07s | 0 | ✅ |
+| retry_loop | scripted | ollama_cloud | resolved ✅ | code_regression ✅ | code_fix ✅ | 0ec99a55 ✅ | 5m 44s | 11m 04s | 1 | ✅ |
 
-**1/1 runs passed.**
+**5/5 runs passed.**
 
 - **api_change**: The knowledge-base provider ships API v2 under live traffic.
 - **bad_release**: A deploy bundles three commits; one renames a tool parameter in the schema only.
