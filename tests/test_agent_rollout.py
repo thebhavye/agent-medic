@@ -28,8 +28,12 @@ def medic(monkeypatch):
     monkeypatch.setattr(agent_mod.rollout, "start", start)
     monkeypatch.setattr(agent_mod.rollout, "finish", finish)
     monkeypatch.setattr(agent_mod.rollout, "judge", lambda watcher, compare: state["verdict"])
+    state["answers"] = {"pass_rate": 1.0, "n": 8}
+    monkeypatch.setattr(agent_mod.canary, "run", lambda st, log, code_dir=None, sha=None: state["answers"])
+    monkeypatch.setattr(agent_mod, "save_state", lambda st: None)
     m = Medic.__new__(Medic)
-    m.auto_deploy, m.log, m.watcher = True, (lambda msg: None), SimpleNamespace()
+    m.auto_deploy, m.log = True, (lambda msg: None)
+    m.watcher = SimpleNamespace(state={"canary_baseline": 1.0})
     monkeypatch.setattr(m, "_promote", lambda inc: calls.__setitem__("promote", calls["promote"] + 1), raising=False)
     return m, calls, state
 
@@ -81,3 +85,14 @@ def test_canary_phase_without_its_rollout_goes_back_to_deploy(medic):
     inc.phase = "canary"
     m.do_canary(inc)
     assert inc.phase == "remedied" and calls["promote"] == 0
+
+
+def test_clean_traces_with_wrong_answers_roll_back(medic):
+    m, calls, state = medic
+    inc = incident()
+    m.do_deploy(inc)
+    state["verdict"] = {"verdict": "healthy", "detail": "4 canary traces at 0%", "state": state["active"]}
+    state["answers"] = {"pass_rate": 0.25, "n": 8}
+    m.do_canary(inc)
+    assert calls["promote"] == 0 and calls["finish"] == 1
+    assert inc.phase == "decided" and "known-answer eval" in inc.remedy["attempts"][-1]["feedback"]

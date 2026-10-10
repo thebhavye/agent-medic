@@ -91,7 +91,9 @@ def attempt(inc, reader, log=print) -> dict:
     if not (root / ".git").exists():
         gitops.git("branch", "--force", branch, "HEAD", cwd=paths.DEPLOY)
         gitops.worktree_add(root, "HEAD", paths.DEPLOY, branch=branch)
-    gitops.git("reset", "--hard", cwd=root)
+    # Every attempt starts from the live release. A fix that was rejected or rolled back in a
+    # canary must not stay on the branch underneath the next one.
+    gitops.git("reset", "--hard", gitops.rev_parse("HEAD", paths.DEPLOY), cwd=root)
     previous = inc.remedy.setdefault("attempts", [])
     n = len(previous) + 1
     record: dict = {"n": n, "accepted": False}

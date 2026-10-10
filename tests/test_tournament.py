@@ -53,3 +53,19 @@ def test_review_rejects_routing_around_a_suspected_function(tmp_path):
     assert any("bypasses read_doc()" in p for p in problems)
     real_fix = [{"path": "target_agent/tools.py", "find": '["body"][:300]', "replace": '["body"]'}]
     assert tournament.review(real_fix, tmp_path, surface("tool_handler", "read_doc", start=1, end=2), suspects) == []
+
+
+def test_review_checks_the_target_lines_not_just_the_file(tmp_path):
+    (tmp_path / "target_agent").mkdir()
+    (tmp_path / "target_agent" / "tools.py").write_text(
+        "SCHEMA = {'name': 'x'}\n" + "\n" * 20 + "def handler(a):\n    return a\n")
+    schema = surface("tool_schema", "x", start=1, end=1)
+    handler_edit = [{"path": "target_agent/tools.py", "find": "    return a", "replace": "    return a.strip()"}]
+    assert any("outside the target" in p for p in tournament.review(handler_edit, tmp_path, schema))
+
+
+def test_soundness_runs_on_the_patched_file(tmp_path):
+    (tmp_path / "a.py").write_text("import json\nx = json.dumps(1)\n")
+    assert tournament.soundness([{"path": "a.py", "find": "", "replace": ""}], tmp_path) == []
+    (tmp_path / "a.py").write_text("import json\nx = json.not_a_function(1)\n")
+    assert any("json.not_a_function" in p for p in tournament.soundness([{"path": "a.py"}], tmp_path))

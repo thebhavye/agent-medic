@@ -11,6 +11,7 @@ import subprocess
 import sys
 import time
 
+from bisect_agent import gitops
 from medic import paths, rollout
 
 
@@ -24,11 +25,21 @@ def run_batch(size: int, workers: int) -> dict:
     cases_file = paths.TRAFFIC / f"batch-{stamp}.jsonl"
     out_file = paths.TRAFFIC / f"batch-{stamp}.json"
     cases_file.write_text("".join(json.dumps(c) + "\n" for c in batch), encoding="utf-8")
-    cmd = [sys.executable, "-m", "target_agent.run_eval", "--cases", str(cases_file), "--out", str(out_file),
-           "--session", f"prod-{sha[:8]}-{stamp}", "--tag", "env:prod", "--tag", f"release:{sha[:12]}",
-           "--workers", str(workers)]
-    env = {**os.environ, "PYTHONPATH": str(code_dir), "KB_URL": paths.KB_URL}
-    subprocess.run(cmd, cwd=code_dir, env=env, capture_output=True, timeout=1800)
+    def run_from(code_dir, sha) -> None:
+        cmd = [sys.executable, "-m", "target_agent.run_eval", "--cases", str(cases_file), "--out", str(out_file),
+               "--session", f"prod-{sha[:8]}-{stamp}", "--tag", "env:prod", "--tag", f"release:{sha[:12]}",
+               "--workers", str(workers)]
+        env = {**os.environ, "PYTHONPATH": str(code_dir), "KB_URL": paths.KB_URL}
+        subprocess.run(cmd, cwd=code_dir, env=env, capture_output=True, timeout=1800)
+
+    try:
+        run_from(code_dir, sha)
+    except (OSError, subprocess.SubprocessError):
+        if code_dir == paths.DEPLOY:
+            raise
+        # The canary ended between routing and running: serve this batch from the stable release.
+        code_dir, sha = paths.DEPLOY, gitops.rev_parse("HEAD", paths.DEPLOY)
+        run_from(code_dir, sha)
     results = json.loads(out_file.read_text(encoding="utf-8"))["cases"] if out_file.exists() else []
     return {"release": sha[:8], "n": len(results), "passed": sum(r["passed"] for r in results)}
 

@@ -53,4 +53,5 @@ def test_route_splits_traffic_and_judge_decides(deploy, monkeypatch):
     traces[:] = [ev(i, state["candidate"][:12], failed=False) for i in range(4)]
     assert rollout.judge(watcher, compare)["verdict"] == "healthy"
     rollout.finish()
-    assert rollout.current() is None and not rollout.root().exists()
+    # Routing stops at once; the worktree stays for a batch that may still be running from it.
+    assert rollout.current() is None and rollout.route()[0] == paths.DEPLOY

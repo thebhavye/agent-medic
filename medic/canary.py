@@ -11,6 +11,7 @@ import os
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 from bisect_agent.metrics import from_cases
 from medic import paths, world
@@ -24,14 +25,16 @@ def due(state: dict) -> bool:
     return not runs or time.time() - runs[-1]["at"] >= INTERVAL_S
 
 
-def run(state: dict, log=print) -> dict:
-    sha = world.head()
-    out = paths.MEDIC_DIR / "canary" / f"{time.strftime('%Y%m%d-%H%M%S')}.json"
+def run(state: dict, log=print, code_dir: Path | None = None, sha: str | None = None) -> dict:
+    """Run the known-answer eval on the deployed release, or on `code_dir` (e.g. a rollout candidate)."""
+    code_dir = code_dir or paths.DEPLOY
+    sha = sha or world.head()
+    out = paths.MEDIC_DIR / "canary" / f"{time.strftime('%Y%m%d-%H%M%S')}-{sha[:8]}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     cmd = [sys.executable, "-m", "target_agent.run_eval", "--cases", str(paths.CASES), "--out", str(out),
            "--session", f"canary-{sha[:8]}-{out.stem}", "--tag", "canary", "--tag", f"release:{sha[:12]}"]
-    env = {**os.environ, "PYTHONPATH": str(paths.DEPLOY), "KB_URL": paths.KB_URL}
-    subprocess.run(cmd, cwd=paths.DEPLOY, env=env, capture_output=True, timeout=1800)
+    env = {**os.environ, "PYTHONPATH": str(code_dir), "KB_URL": paths.KB_URL}
+    subprocess.run(cmd, cwd=code_dir, env=env, capture_output=True, timeout=1800)
     if not out.exists():
         record = {"at": time.time(), "release": sha[:12], "error": "canary eval did not produce results"}
     else:
@@ -47,6 +50,17 @@ def run(state: dict, log=print) -> dict:
             state["canary_baseline"] = record["pass_rate"]
         log(f"[medic] canary on {sha[:8]}: pass {record['pass_rate']:.0%} ({record['n']} known-answer questions)")
     return record
+
+
+def answers_hold(record: dict, state: dict) -> tuple[bool, str]:
+    """Does a canary run keep answers at the healthy level? (No baseline: an absolute bar.)"""
+    if "pass_rate" not in record:
+        return False, record.get("error", "the canary eval produced no results")
+    base = state.get("canary_baseline")
+    bar = base - DROP if base is not None else 0.75
+    ok = record["pass_rate"] >= bar
+    return ok, (f"known-answer eval on the candidate: pass {record['pass_rate']:.0%} "
+                f"({'meets' if ok else 'below'} the {bar:.0%} bar)")
 
 
 def regressed(state: dict) -> dict | None:

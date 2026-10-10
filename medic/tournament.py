@@ -79,6 +79,13 @@ def review(edits: list[dict], root: Path, target: dict, suspects: list[dict] | N
     off_target = [e["path"] for e in edits if e["path"].replace("\\", "/") != target["file"]]
     if off_target:
         problems.append(f"edits outside the target file {target['file']}: {sorted(set(off_target))}")
+    else:
+        # In the right file is not enough: the edit has to touch the target's own lines.
+        for e in edits:
+            span = _location(root / e["path"], e["find"])
+            if span and (span[1] < target["start"] - LINE_SLACK or span[0] > target["end"] + LINE_SLACK):
+                problems.append(f"edits lines {span[0]}-{span[1]}, outside the target "
+                                f"{target['kind']} {target['name']} (lines {target['start']}-{target['end']})")
     changed = sum(max(len(e["find"].splitlines()), len(e["replace"].splitlines())) for e in edits)
     limit = LINE_LIMIT.get(target["kind"], 20)
     if changed > limit:
@@ -86,7 +93,28 @@ def review(edits: list[dict], root: Path, target: dict, suspects: list[dict] | N
     for e in edits:
         if len(BROAD_EXCEPT.findall(e["replace"])) > len(BROAD_EXCEPT.findall(e["find"])):
             problems.append(f"{e['path']} adds a broad except block that would hide failures")
+    return problems
+
+
+LINE_SLACK = 3      # an edit may start or end a few lines outside its target (decorators, a blank line)
+
+
+def _location(path: Path, find: str) -> tuple[int, int] | None:
+    """Line range (1-based) of `find` in the file, or None if it isn't there."""
+    if not path.exists() or not find:
+        return None
+    text = path.read_bytes().decode("utf-8", errors="replace").replace("\r\n", "\n")
+    pos = text.find(find.replace("\r\n", "\n"))
+    if pos < 0:
+        return None
+    start = text.count("\n", 0, pos) + 1
+    return start, start + find.count("\n")
+
+
+def soundness(edits: list[dict], root: Path) -> list[str]:
+    """After the edits are applied: changed files compile and call nothing that doesn't exist."""
     from medic.external import REVIEW_CHECK
+    problems = []
     for path in sorted({e["path"] for e in edits if e["path"].endswith(".py")}):
         full = root / path
         if full.exists():
@@ -161,14 +189,28 @@ def run(inc, base_prompt, verify, log=print) -> dict:
             apply_edits(root, proposal["edits"])
         except EditError as exc:
             return {**record, "verdict": "did_not_apply", "feedback": str(exc)}
+        # Checks that need the fix in place: does the patched file compile, does it call real things.
+        unsound = soundness(proposal["edits"], root)
+        if unsound:
+            return {**record, "verdict": "rejected_in_review", "feedback": "; ".join(unsound)}
         metrics, verify_problems = verify(root, f"cand-{inc.id}-a{n_attempt}-c{i}")
         record.update(metrics=metrics, changed_lines=_changed_lines(proposal["edits"]))
         if verify_problems:
             return {**record, "verdict": "failed_verification", "feedback": "; ".join(verify_problems)}
         return {**record, "verdict": "passed", "feedback": "verified"}
 
+    def safely(pair) -> dict:
+        """One candidate failing (an eval timeout, a crash) must not discard the others."""
+        i, target = pair
+        try:
+            return compete(i, target)
+        except Exception as exc:
+            return {"candidate": i, "root": str(roots[i]), "verdict": "error",
+                    "target": {k: target[k] for k in ("kind", "name", "file", "start", "end")} if target else None,
+                    "feedback": f"{type(exc).__name__}: {exc}"[:400]}
+
     with ThreadPoolExecutor(max_workers=max(1, len(aims))) as pool:
-        board = list(pool.map(lambda pair: compete(*pair), enumerate(aims)))
+        board = list(pool.map(safely, enumerate(aims)))
     for c in board:
         log(f"[medic] candidate {c['candidate']} on {_label(c)}: {c['verdict']}"
             + (f" (pass {c['metrics']['pass_rate']:.0%}, {c.get('changed_lines')} lines)" if c.get("metrics") else "")

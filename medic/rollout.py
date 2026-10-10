@@ -58,8 +58,10 @@ def route() -> tuple[Path, str]:
 
 
 def finish() -> None:
+    """Stop routing traffic to the candidate. The worktree stays: a traffic batch in another
+    process may still be running from it, and deleting it under that batch would crash the
+    traffic loop. The next rollout's start() replaces it."""
     _file().unlink(missing_ok=True)
-    gitops.worktree_remove(root(), paths.DEPLOY)
 
 
 def judge(watcher, compare) -> dict | None:
