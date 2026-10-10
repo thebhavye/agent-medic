@@ -402,22 +402,28 @@ def value(name: str, default):
 def request():
     """One agent request: the scope for the loop guard, for reporting each fix once, and the
     unit armed mode judges (did this request fail the way code makes requests fail?)."""
-    scope = {"calls": {}, "reported": set(), "failed": False, "tool_calls": 0,
+    scope = {"calls": {}, "reported": set(), "failed": False, "outage": False, "tool_calls": 0,
              "engaged": _engagement() is not None if _standby() else False}
     token = _request.set(scope)
     try:
         yield
-    except Exception:
-        scope["failed"] = True
+    except Exception as exc:
+        if outage(exc):
+            scope["outage"] = True
+        else:
+            scope["failed"] = True
         raise
     finally:
         _request.reset(token)
         try:
-            # A request that blew far past the healthy tool-call budget failed too: a cost regression.
-            budget = ((_standby() or {}).get("limits") or {}).get("tool_calls_per_request")
-            if budget and scope["tool_calls"] > budget:
-                scope["failed"] = True
-            _record_outcome(scope["failed"], scope["engaged"])
+            # A request hit by an outage (a dead tool backend, an unavailable model) says nothing
+            # about the code: it counts neither for nor against the standby.
+            if not scope["outage"]:
+                # A request that blew far past the healthy tool-call budget failed: a cost regression.
+                budget = ((_standby() or {}).get("limits") or {}).get("tool_calls_per_request")
+                if budget and scope["tool_calls"] > budget:
+                    scope["failed"] = True
+                _record_outcome(scope["failed"], scope["engaged"])
         except Exception:  # noqa: BLE001 - judging must never break the agent
             pass
 
@@ -439,15 +445,16 @@ def failed(reason: str = "") -> None:
 
 def guard_tool(name: str, args, run):
     """Call a tool through the breakers and the loop guard."""
-    if ((_payload() or {}).get("breakers") or {}).get(name) == "open":
-        _report("breaker", name, f"{name} is cut off by Medic while its dependency is down")
-        raise FirstAidError(f"{name} is temporarily unavailable; answer without it and say so")
+    scope = _request.get()
+    cut_off = ((_payload() or {}).get("breakers") or {}).get(name) == "open"
     state = _breakers.setdefault(name, {"failures": 0, "open_until": 0.0})
-    if state["open_until"] > time.time():
-        _report("breaker", name, f"{name} failed {BREAKER_FAILURES} times in a row; paused")
+    if cut_off or state["open_until"] > time.time():
+        _report("breaker", name, f"{name} is cut off by Medic while its dependency is down" if cut_off
+                else f"{name} failed {BREAKER_FAILURES} times in a row; paused")
+        if scope is not None:
+            scope["outage"] = True      # a dependency outage, not the code: armed mode ignores it
         raise FirstAidError(f"{name} is temporarily unavailable; answer without it and say so")
 
-    scope = _request.get()
     if scope is not None:
         scope["tool_calls"] += 1
         key = (name, json.dumps(args, sort_keys=True, default=str))
@@ -468,6 +475,8 @@ def guard_tool(name: str, args, run):
             state["failures"] += 1
             if state["failures"] >= BREAKER_FAILURES:
                 state["open_until"] = time.time() + BREAKER_COOLDOWN_S
+            if scope is not None:
+                scope["outage"] = True
         elif scope is not None:
             scope["failed"] = True      # code-shaped (bad args, a handler bug): what armed mode heals
         raise
@@ -477,6 +486,15 @@ def guard_tool(name: str, args, run):
 
 DOWN_TYPES = {"ConnectError", "ConnectTimeout", "ReadTimeout", "WriteTimeout", "PoolTimeout", "TimeoutException",
               "RemoteProtocolError", "ServiceUnavailable", "APIConnectionError", "APITimeoutError"}
+
+
+def model_unavailable(exc: BaseException) -> bool:
+    return bool(MODEL_UNAVAILABLE.search(f"{type(exc).__name__}: {exc}"))
+
+
+def outage(exc: BaseException) -> bool:
+    """Something outside the agent's code can't serve right now: a tool backend or the model."""
+    return dependency_down(exc) or model_unavailable(exc)
 
 
 def dependency_down(exc: BaseException) -> bool:
@@ -496,10 +514,13 @@ def call_model(fn, model: str):
         try:
             result = fn(candidate)
         except Exception as exc:
-            if i + 1 < len(candidates) and MODEL_UNAVAILABLE.search(f"{type(exc).__name__}: {exc}"):
+            if i + 1 < len(candidates) and model_unavailable(exc):
                 _report("fallback", candidate, f"{candidate} unavailable ({type(exc).__name__}); "
                                                f"trying {candidates[i + 1]}")
                 continue
+            scope = _request.get()
+            if scope is not None and outage(exc):
+                scope["outage"] = True  # even if the agent catches it and finishes with an error
             raise
         return result
     raise RuntimeError("no model candidates")   # unreachable: the loop returns or raises
