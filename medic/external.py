@@ -244,11 +244,75 @@ def fix_prompt(spec: dict, case: Case, previous: list[dict]) -> str:
     follow_ups = [f for a in previous for f in a.get("follow_ups", [])]
     if follow_ups:
         sections.append("<other_failures_seen_during_verification>\n" + "\n".join(follow_ups[:4]) +
-                        "\nThese are separate from the diagnosed fault. Fix them only if the fix is small and safe "
-                        "(for example, handling a tool error instead of crashing).\n</other_failures_seen_during_verification>")
+                        "\nThese are separate from the diagnosed fault and are NOT yours to fix here. Do not add error "
+                        "handling, retries or wrappers for them; they are reported separately.\n"
+                        "</other_failures_seen_during_verification>")
     for i, a in enumerate(previous, 1):
         sections.append(f"<previous_attempt n=\"{i}\">\nedits: {json.dumps(a.get('edits'))}\nresult: {a.get('feedback')}\n</previous_attempt>")
     return "\n\n".join(sections)
+
+
+MAX_LINES = {"update_model": 6}      # changed lines a fix of this kind should need
+BROAD_EXCEPT = re.compile(r"^\s*except\s*(Exception|BaseException)?\s*(as\s+\w+)?\s*:", re.M)
+
+
+def review(spec: dict, case: Case, edits: list[dict]) -> list[str]:
+    """Is the fix a good one, not just a working one? Checked before anything runs.
+
+    - proportionate: a fix should be about as big as the diagnosis calls for
+    - honest: it must not add broad except blocks that hide failures (they make a broken
+      agent look healthy, which is exactly what Medic exists to catch)
+    - sound: changed Python files compile, and `module.attr` references to the target's
+      own imports exist in the target's installed packages
+    """
+    problems = []
+    remedy = case.decision.get("remedy", {})
+    changed = sum(max(len(e["find"].splitlines()), len(e["replace"].splitlines())) for e in edits)
+    limit = MAX_LINES.get(remedy.get("kind"))
+    if remedy.get("also"):
+        limit = (limit or 0) + 6
+    if limit and changed > limit:
+        problems.append(f"the fix changes {changed} lines but a {remedy['kind']} should need about {limit}; "
+                        "change only what the diagnosis requires")
+    for e in edits:
+        added = len(BROAD_EXCEPT.findall(e["replace"])) - len(BROAD_EXCEPT.findall(e["find"]))
+        if added > 0:
+            problems.append(f"{e['path']} adds a broad except block that would hide failures; let errors surface")
+    python = str(workdir(spec) / spec["python"])
+    for path in sorted({e["path"] for e in edits if e["path"].endswith(".py")}):
+        full = spec["repo"] / path
+        check = subprocess.run([python, "-c", REVIEW_CHECK, str(full)], capture_output=True, text=True,
+                               cwd=workdir(spec), timeout=120)
+        if check.returncode != 0:
+            problems.append(f"{path}: {check.stdout.strip() or check.stderr.strip()[-300:]}")
+    return problems
+
+
+# Run inside the target's own environment: compile the file, then confirm that every
+# `name.attr` used on an imported module exists in the installed package.
+REVIEW_CHECK = r"""
+import ast, importlib, sys
+src = open(sys.argv[1], encoding="utf-8").read()
+tree = ast.parse(src)
+compile(src, sys.argv[1], "exec")
+modules = {}
+for node in ast.walk(tree):
+    if isinstance(node, ast.Import):
+        for a in node.names:
+            modules[a.asname or a.name.split(".")[0]] = a.name.split(".")[0] if not a.asname else a.name
+missing = []
+for node in ast.walk(tree):
+    if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id in modules:
+        try:
+            mod = importlib.import_module(modules[node.value.id])
+        except Exception:
+            continue
+        if not hasattr(mod, node.attr):
+            missing.append(f"{node.value.id}.{node.attr}")
+if missing:
+    print("calls that do not exist in the installed packages: " + ", ".join(sorted(set(missing))))
+    sys.exit(1)
+"""
 
 
 def fault_class(err: dict) -> tuple:
@@ -291,6 +355,12 @@ def attempt_fix(spec: dict, case: Case, reader) -> dict:
         apply_edits(spec["repo"], edits)
     except EditError as exc:
         record["feedback"] = f"edits did not apply: {exc}"
+        return record
+    problems = review(spec, case, edits)
+    record["review"] = problems
+    if problems:
+        git(spec, "checkout", "-q", "--", ".")
+        record["feedback"] = "rejected in review before running: " + "; ".join(problems)
         return record
     if any(e["path"].endswith("requirements.txt") for e in edits):
         wd = workdir(spec)
