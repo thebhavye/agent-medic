@@ -162,11 +162,21 @@ def setup(api: Api, baseline: dict | None = None, webhook_url: str | None = None
                                                           "eventTypes": WEBHOOK_EVENTS,
                                                           "secret": state["webhook_secret"]})["id"]
         log(f"[neatlogs] webhook created: {webhook_url}")
-    existing_rules = {r.get("name"): r["id"] for r in api.call("GET", "/alert-rules", limit=100).get("alertRules", [])}
+    existing_rules = {r.get("name"): r for r in api.call("GET", "/alert-rules", limit=100).get("alertRules", [])}
     state.setdefault("rules", {})
     for key, rule in _alert_rules(state["detections"], baseline, state.get("webhook")).items():
         if rule["name"] in existing_rules:
-            state["rules"][key] = existing_rules[rule["name"]]
+            existing = existing_rules[rule["name"]]
+            state["rules"][key] = existing["id"]
+            # A webhook added on a later run: existing rules must deliver to it too.
+            wanted = set(rule["channelMask"]["webhookIds"])
+            have = set(((existing.get("channelMask") or {}).get("webhookIds")) or [])
+            if wanted - have:
+                try:
+                    api.call("PATCH", f"/alert-rules/{existing['id']}", {"channelMask": rule["channelMask"]})
+                    log(f"[neatlogs] alert rule now delivers to the webhook: {rule['name']}")
+                except NeatlogsError as exc:
+                    state["skipped"][f"rule-webhook:{key}"] = str(exc)
             continue
         try:
             state["rules"][key] = api.call("POST", "/alert-rules", rule)["id"]
@@ -287,11 +297,7 @@ def _iso_ts(value) -> float:
         return 0.0
 
 
-RECENT_CARD_S = 3600      # a card for the same workflow this close to the incident is about it
-
-
-def investigate(trace_ids: list[str], opened_at: float, workflow: str = paths.WORKFLOW,
-                mcp: Mcp | None = None) -> dict:
+def investigate(trace_ids: list[str], opened_at: float = 0.0, mcp: Mcp | None = None) -> dict:
     """neatlogs' own investigation of this failure (its fix card), as an investigator finding."""
     finding = {"investigator": "neatlogs", "verdict": "none", "confidence": 0.0, "detail": ""}
     try:
@@ -300,14 +306,11 @@ def investigate(trace_ids: list[str], opened_at: float, workflow: str = paths.WO
     except Exception as exc:  # noqa: BLE001 - neatlogs being unreachable must not stop the diagnosis
         return {**finding, "verdict": "unavailable", "detail": f"neatlogs MCP: {type(exc).__name__}: {exc}"}
     ids = set(trace_ids)
-    # The card that links these very traces; else a fresh card for the same workflow. Never an
-    # unrelated card: that would be evidence about some other failure.
+    # Only the card that links these very traces. A card that merely looks related (same
+    # workflow, same hour) may be another failure's: Medic would overwrite its findings and
+    # could resolve it while that failure goes on.
     matched = sorted(cards, key=lambda c: -len(_linked(c) & ids))
     card = next((c for c in matched if _linked(c) & ids), None)
-    if card is None:
-        fresh = [c for c in cards if c.get("workflow_name") == workflow
-                 and _iso_ts(c.get("created_at")) >= opened_at - RECENT_CARD_S]
-        card = max(fresh, key=lambda c: _iso_ts(c.get("created_at")), default=None)
     if card is None:
         return {**finding, "detail": "neatlogs has no fix card for these traces yet"}
     detail, trail = card, None

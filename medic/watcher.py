@@ -105,6 +105,26 @@ class Watcher:
         save_state(self.state)
         return len(new)
 
+    def evidence_for(self, trace_ids: list[str]) -> list[evidence.TraceEvidence]:
+        """Evidence for specific traces (an alert's samples), in the given order: from what the
+        watcher already read, else fetched from neatlogs. Only finalized production traces of
+        this deployment; the rolling window is left alone."""
+        known = {e.trace_id: e for e in self.all_evidence()}
+        out = []
+        for trace_id in dict.fromkeys(trace_ids):
+            if trace_id in known:
+                out.append(known[trace_id])
+                continue
+            try:
+                trace = self.reader._get(f"/traces/{trace_id}")
+                trace = trace.get("trace", trace)
+                if (trace.get("finalizationStatus") == "finalized" and "env:prod" in (trace.get("tags") or [])
+                        and self._ours(trace["tags"])):
+                    out.append(evidence.collect(self.reader, trace))
+            except Exception as exc:  # noqa: BLE001 - a sample we can't read is skipped, not fatal
+                self.log(f"[medic] could not read alert sample {trace_id[:8]}: {type(exc).__name__}")
+        return out
+
     def _ours(self, tags: list[str]) -> bool:
         """Only traces from releases in this deployment's history (not an earlier deployment's)."""
         release = next((t.split(":", 1)[1] for t in tags if t.startswith("release:")), "")

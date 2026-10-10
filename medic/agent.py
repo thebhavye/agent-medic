@@ -60,10 +60,16 @@ class Medic:
         # neatlogs' detections and alert rules watch every span as it arrives: a fired alert is
         # the earliest, best-grounded signal Medic gets.
         alerts = self._neatlogs_alerts()
-        signals = [*signals, *(Signal("neatlogs_alert", "neatlogs_alert_hits", float(a.get("threshold") or 0),
-                                      float(a.get("count") or 0)) for a in alerts)]
-        if signals and not self._recently_escalated(signals):
-            self.open(signals, alerts)
+        # Each alert keeps its rule's identity, so one rule's escalation never hides another's.
+        signals = [*signals, *(Signal(f"neatlogs_alert:{a.get('ruleName') or a.get('ruleId')}", "neatlogs_alert_hits",
+                                      float(a.get("threshold") or 0), float(a.get("count") or 0)) for a in alerts)]
+        if signals:
+            escalated = self._recently_escalated(signals)
+            if escalated is None:
+                self.open(signals, alerts)
+            elif alerts:
+                # Same problem a human is already handling: record the alert there, not nowhere.
+                self._attach_alerts(escalated, alerts)
         # check() may just have recorded the healthy release: arm the runtime now, not a tick
         # later, so a release that breaks right away already meets an armed runtime.
         self._refresh_standby()
@@ -102,6 +108,12 @@ class Medic:
             f"{a.get('ruleName')} ({a.get('count')} hits)" for a in alerts), self.log)
         incidents.save(inc)
 
+    def _evidence(self, inc: Incident) -> list:
+        """The incident's traces: neatlogs' alert samples first (the failures neatlogs saw), then
+        the window that opened it. Samples the watcher hasn't read are fetched from neatlogs."""
+        ids = list(dict.fromkeys((inc.neatlogs.get("sample_trace_ids") or []) + inc.trace_ids))
+        return self.watcher.evidence_for(ids)
+
     def _card_id(self, inc: Incident) -> str | None:
         return ((inc.findings.get("neatlogs") or {}).get("suggestion_id")
                 or (inc.neatlogs.get("card") or {}).get("suggestion_id"))
@@ -111,15 +123,20 @@ class Medic:
         incident: each milestone appends a version, so the card's history shows the healing."""
         if self._neatlogs() is None:
             return
-        if resolved or inc.phase in ("deployed", "escalated"):
-            self._late_neatlogs_card(inc)
         notes = inc.neatlogs.setdefault("notes", [])
         notes.append({"at": time.time(), "text": text, "card": False})
+        # The proven root cause and the shipped fix wait here until a card takes them: neatlogs
+        # often creates its card after Medic's diagnosis, and that card should still get them.
+        pending = inc.neatlogs.setdefault("pending", {})
+        pending.update({k: v for k, v in sections.items() if v})
+        self._late_neatlogs_card(inc)
         card = self._card_id(inc)
         if card:
             evidence = (f"**Agent Medic**, incident `{inc.id}`: what was proven and done\n\n"
                         + "\n".join(f"- {time.strftime('%H:%M:%S', time.localtime(n['at']))} {n['text']}" for n in notes))
-            notes[-1]["card"] = neatlogs_link.update_card(card, evidence_reasoning=evidence, **sections)
+            if neatlogs_link.update_card(card, evidence_reasoning=evidence, **pending):
+                notes[-1]["card"] = True
+                pending.clear()
         if resolved and card and neatlogs_link.update_fix(card, "resolved", note=f"Agent Medic: {text}"):
             inc.neatlogs["suggestion_resolved"] = card
 
@@ -160,13 +177,14 @@ class Medic:
         except Exception as exc:  # noqa: BLE001 - arming is best effort; detection still works
             self.log(f"[medic] could not arm the runtime: {type(exc).__name__}: {exc}")
 
-    def _recently_escalated(self, signals) -> bool:
-        """Don't reopen the same problem every tick while a human handles an escalation."""
+    def _recently_escalated(self, signals) -> Incident | None:
+        """Don't reopen the same problem every tick while a human handles an escalation: the
+        escalated incident that already covers these signals, or None."""
         names = {s.name for s in signals}
         for inc in reversed(incidents.load_all()):
             if inc.phase == "escalated" and time.time() - inc.opened_at < 1800 and                     names <= {s["name"] for s in inc.signals}:
-                return True
-        return False
+                return inc
+        return None
 
     def run(self, interval: float) -> None:
         while True:
@@ -239,16 +257,19 @@ class Medic:
         incidents.save(inc)
 
     def do_triage(self, inc: Incident) -> None:
-        by_id = {e.trace_id: e for e in self.watcher.all_evidence()}
-        evs = [by_id[t] for t in inc.trace_ids if t in by_id]
+        evs = self._evidence(inc)
         inc.triage = triage.triage(evs, inc.signals, release_changed=inc.release[:12] != inc.healthy_release[:12])
         last = (self.watcher.state.get("canary") or [{}])[-1]
         if any(s["name"] == "quality" for s in inc.signals) and last.get("failed"):
             inc.triage["examples"] = [{"question": f["question"], "answer": f["answer"], "expect": f["expect"],
                                        "tool_errors": []} for f in last["failed"][:4]]
             canary_line = f"canary: {len(last['failed'])}/{last['n']} known-answer questions now answered wrong"
-            if any(s["name"] in ("tool_errors", "failures") for s in inc.signals):
-                inc.triage["summary"] = f"{inc.triage['summary']}; {canary_line}"   # both: keep the trace evidence
+            # Claim "no errors" only when the traces themselves show none: no failing trace in the
+            # evidence and no neatlogs alert. Otherwise keep the trace account and add the canary's.
+            traces_failed = any(e.failed or e.tool_errors for e in evs) or bool(inc.neatlogs.get("alert")) or any(
+                s["name"] in ("tool_errors", "failures") or s["name"].startswith("neatlogs_alert") for s in inc.signals)
+            if traces_failed:
+                inc.triage["summary"] = f"{inc.triage['summary']}; {canary_line}"
             else:
                 inc.triage["summary"] = f"{canary_line}, while production traces show no errors"
         if self._neatlogs() is not None:
@@ -257,8 +278,7 @@ class Medic:
         inc.phase = "triaged"
 
     def do_investigate(self, inc: Incident) -> None:
-        by_id = {e.trace_id: e for e in self.watcher.all_evidence()}
-        evs = [by_id[t] for t in inc.trace_ids if t in by_id]
+        evs = self._evidence(inc)
         jobs = {
             "dependency": lambda: dependency.investigate(paths.KB_URL, self.watcher.state.get("contract"),
                                                          inc.triage["examples"]),
