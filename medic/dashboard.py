@@ -308,10 +308,11 @@ class Server(ThreadingHTTPServer):
     allow_reuse_address = False
 
 
-def serve(port: int, medic_dir: Path) -> None:
+def serve(port: int, medic_dir: Path, host: str = "127.0.0.1") -> None:
+    """Local only by default; pass host="0.0.0.0" to serve others (the page is read-only)."""
     handler = type("BoundHandler", (Handler,), {"medic_dir": Path(medic_dir)})
-    server = Server(("127.0.0.1", port), handler)
-    print(f"[dashboard] http://127.0.0.1:{port}  (reading {medic_dir})", flush=True)
+    server = Server((host, port), handler)
+    print(f"[dashboard] http://{host}:{port}  (reading {medic_dir})", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -321,10 +322,11 @@ def serve(port: int, medic_dir: Path) -> None:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="agent-medic dashboard")
     parser.add_argument("--port", type=int, default=8790)
+    parser.add_argument("--host", default="127.0.0.1", help="0.0.0.0 to serve other machines (e.g. on EC2)")
     parser.add_argument("--medic-dir", type=Path, default=paths.MEDIC_DIR,
                         help="a MEDIC_DIR, or a benchmark run under .medic/bench to replay it")
     args = parser.parse_args(argv)
-    serve(args.port, args.medic_dir)
+    serve(args.port, args.medic_dir, args.host)
     return 0
 
 
