@@ -14,10 +14,12 @@ detections for failed tool calls, non-answers and refusals; threshold alert rule
 metric rules on tool failure rate and tokens; and, given a public URL, one webhook.
 """
 
+import contextlib
 import json
 import os
 import secrets
 import time
+from datetime import datetime
 from pathlib import Path
 
 import httpx
@@ -251,46 +253,67 @@ class Mcp:
             return joined
 
 
-def _items(listing) -> list[dict]:
-    if isinstance(listing, list):
-        return [x for x in listing if isinstance(x, dict)]
+def _cards(listing) -> list[dict]:
     if isinstance(listing, dict):
-        for key in ("suggestions", "items", "fixes", "data", "results"):
-            if isinstance(listing.get(key), list):
-                return [x for x in listing[key] if isinstance(x, dict)]
-    return []
+        listing = listing.get("triage_cards") or listing.get("cards") or []
+    return [c for c in listing or [] if isinstance(c, dict)]
 
 
-def _mentions(obj, ids: set[str]) -> bool:
-    return bool(ids) and any(i in json.dumps(obj, default=str) for i in ids)
+def _linked(card: dict) -> set[str]:
+    linked = card.get("linked_trace_ids") or []
+    if isinstance(linked, str):                 # some responses carry the list as a string
+        linked = [t.strip(" '\"") for t in linked.strip("[]").split(",")]
+    return {t for t in linked if t}
 
 
-def investigate(trace_ids: list[str], opened_at: float, mcp: Mcp | None = None) -> dict:
-    """neatlogs' own investigation of this failure, as an investigator finding."""
+def _iso_ts(value) -> float:
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return 0.0
+
+
+RECENT_CARD_S = 3600      # a card for the same workflow this close to the incident is about it
+
+
+def investigate(trace_ids: list[str], opened_at: float, workflow: str = paths.WORKFLOW,
+                mcp: Mcp | None = None) -> dict:
+    """neatlogs' own investigation of this failure (its fix card), as an investigator finding."""
     finding = {"investigator": "neatlogs", "verdict": "none", "confidence": 0.0, "detail": ""}
     try:
         mcp = mcp or Mcp().connect()
-        suggestions = _items(mcp.tool("triage_list"))
+        cards = _cards(mcp.tool("triage_list"))
     except Exception as exc:  # noqa: BLE001 - neatlogs being unreachable must not stop the diagnosis
         return {**finding, "verdict": "unavailable", "detail": f"neatlogs MCP: {type(exc).__name__}: {exc}"}
     ids = set(trace_ids)
-    matched = [s for s in suggestions if _mentions(s, ids)] or suggestions[:1]
-    if not matched:
-        return {**finding, "detail": "neatlogs has no fix suggestion for these traces yet"}
-    suggestion = matched[0]
-    sid = suggestion.get("id") or suggestion.get("suggestionId")
-    detail, trail = suggestion, None
+    # The card that links these very traces; else a fresh card for the same workflow. Never an
+    # unrelated card: that would be evidence about some other failure.
+    matched = sorted(cards, key=lambda c: -len(_linked(c) & ids))
+    card = next((c for c in matched if _linked(c) & ids), None)
+    if card is None:
+        fresh = [c for c in cards if c.get("workflow_name") == workflow
+                 and _iso_ts(c.get("created_at")) >= opened_at - RECENT_CARD_S]
+        card = max(fresh, key=lambda c: _iso_ts(c.get("created_at")), default=None)
+    if card is None:
+        return {**finding, "detail": "neatlogs has no fix card for these traces yet"}
+    detail, trail = card, None
+    with contextlib.suppress(Exception):
+        detail = mcp.tool("triage_get", triage_id=card["triage_id"]) or card
+    if card.get("thread_id"):
+        with contextlib.suppress(Exception):
+            trail = mcp.tool("triage_get_investigation", thread_id=card["thread_id"])
+    d = {**card, **(detail if isinstance(detail, dict) else {})}
     try:
-        detail = mcp.tool("triage_get", id=sid) or suggestion
-        trail = mcp.tool("triage_get_investigation", id=sid)
-    except Exception:  # noqa: BLE001
-        pass
-    d = detail if isinstance(detail, dict) else {}
-    return {"investigator": "neatlogs", "verdict": "root_cause", "suggestion_id": sid,
-            "confidence": float(d.get("confidence") or 0.6),
-            "detail": str(d.get("title") or d.get("rootCause") or d.get("description") or "")[:300],
-            "location": d.get("location") or d.get("file"), "analysis": str(d.get("analysis") or "")[:800],
-            "matched_traces": _mentions(suggestion, ids), "investigation": trail if isinstance(trail, (dict, list)) else None}
+        confidence = float(d.get("confidence") or 0.6)
+    except (TypeError, ValueError):
+        confidence = 0.6
+    return {"investigator": "neatlogs", "verdict": "root_cause", "suggestion_id": card["triage_id"],
+            "confidence": round(confidence, 2), "detail": str(d.get("title") or "")[:300],
+            "root_cause": str(d.get("root_cause") or "")[:800], "label": d.get("triage_label"),
+            "severity": d.get("severity"), "location": d.get("location") or d.get("file"),
+            "analysis": str(d.get("analysis") or d.get("root_cause") or "")[:800],
+            "matched_traces": len(_linked(card) & ids),
+            "investigation": trail if isinstance(trail, (dict, list)) else None}
 
 
 # -- writing back -------------------------------------------------------------------------
@@ -309,11 +332,16 @@ def annotate(api: Api, trace_ids: list[str], comment: str, issue_types: list[str
 
 
 def update_fix(suggestion_id: str | None, status: str, mcp: Mcp | None = None) -> bool:
-    """Move neatlogs' fix suggestion on its board (e.g. to resolved once the cure holds)."""
-    if not suggestion_id:
+    """Move neatlogs' fix card on its board (e.g. to resolved once the cure holds), which also
+    starts neatlogs' own verification watch.
+
+    neatlogs records the change under a person's team email and asks that the user agree to
+    it: Medic only does this when NEATLOGS_USER_EMAIL has been set by the user."""
+    email = os.environ.get("NEATLOGS_USER_EMAIL")
+    if not suggestion_id or not email:
         return False
     try:
-        (mcp or Mcp().connect()).tool("triage_update_status", id=suggestion_id, status=status)
+        (mcp or Mcp().connect()).tool("triage_update_status", triage_id=suggestion_id, user_email=email, status=status)
         return True
     except Exception:  # noqa: BLE001
         return False

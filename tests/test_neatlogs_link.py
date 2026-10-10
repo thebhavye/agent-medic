@@ -115,6 +115,7 @@ def test_annotate_writes_medics_account_onto_the_traces(nl):
 class FakeMcp(BaseHTTPRequestHandler):
     """A Streamable-HTTP MCP server with the triage tools, answering over SSE."""
     calls: list = []
+    args: list = []
 
     def do_POST(self):
         msg = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
@@ -124,9 +125,15 @@ class FakeMcp(BaseHTTPRequestHandler):
             self.end_headers()
             return
         tool = (msg.get("params") or {}).get("name")
-        payload = {"triage_list": [{"id": "s1", "title": "read_doc truncates bodies", "traces": ["t2"]},
-                                   {"id": "s2", "title": "unrelated", "traces": ["zz"]}],
-                   "triage_get": {"id": "s1", "title": "read_doc truncates document bodies at 300 chars",
+        args = (msg.get("params") or {}).get("arguments") or {}
+        FakeMcp.args.append((tool, args))
+        payload = {"triage_list": {"total": 2, "triage_cards": [
+                       {"triage_id": "s2", "title": "unrelated", "linked_trace_ids": ["zz"], "workflow_name": "other",
+                        "created_at": "2026-10-10T00:00:00Z", "thread_id": "th2"},
+                       {"triage_id": "s1", "title": "read_doc truncates bodies", "linked_trace_ids": "['t2', 'q9']",
+                        "workflow_name": "research-agent", "created_at": "2026-10-10T00:00:00Z", "thread_id": "th1",
+                        "confidence": "0.7250000238418579", "root_cause": "read_doc cuts bodies at 300 chars"}]},
+                   "triage_get": {"triage_id": "s1", "title": "read_doc truncates document bodies at 300 chars",
                                   "location": "target_agent/tools.py:read_doc", "confidence": 0.8},
                    "triage_get_investigation": {"steps": [{"tool": "get_trace_context"}]},
                    "triage_update_status": {"ok": True}}.get(tool, {})
@@ -147,20 +154,37 @@ class FakeMcp(BaseHTTPRequestHandler):
 @pytest.fixture
 def mcp_server():
     FakeMcp.calls = []
+    FakeMcp.args = []
     server = ThreadingHTTPServer(("127.0.0.1", 0), FakeMcp)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     yield f"http://127.0.0.1:{server.server_address[1]}/mcp"
     server.shutdown()
 
 
-def test_investigation_comes_from_the_matching_neatlogs_fix(mcp_server):
+def test_investigation_comes_from_the_card_that_links_these_traces(mcp_server, monkeypatch):
     mcp = neatlogs_link.Mcp(mcp_server, key="project-key").connect()
     finding = neatlogs_link.investigate(["t1", "t2"], time.time(), mcp=mcp)
-    assert finding["verdict"] == "root_cause" and finding["suggestion_id"] == "s1" and finding["matched_traces"]
+    assert finding["verdict"] == "root_cause" and finding["suggestion_id"] == "s1" and finding["matched_traces"] == 1
     assert "read_doc" in finding["location"] and finding["confidence"] == 0.8
+    assert ("triage_get", {"triage_id": "s1"}) in FakeMcp.args
+    assert ("triage_get_investigation", {"thread_id": "th1"}) in FakeMcp.args
     assert all(auth == "Bearer project-key" for _, _, auth in FakeMcp.calls)
-    assert neatlogs_link.update_fix("s1", "resolved", mcp=mcp)
-    assert ("tools/call", "triage_update_status", "Bearer project-key") in FakeMcp.calls
+
+
+def test_an_unrelated_card_is_never_used_as_evidence(mcp_server):
+    mcp = neatlogs_link.Mcp(mcp_server, key="k").connect()
+    finding = neatlogs_link.investigate(["nothing-linked"], time.time(), mcp=mcp)   # cards are old and unlinked
+    assert finding["verdict"] == "none"
+
+
+def test_moving_the_neatlogs_card_needs_the_users_email(mcp_server, monkeypatch):
+    mcp = neatlogs_link.Mcp(mcp_server, key="k").connect()
+    monkeypatch.delenv("NEATLOGS_USER_EMAIL", raising=False)
+    assert neatlogs_link.update_fix("s1", "resolved", mcp=mcp) is False
+    assert not any(t == "triage_update_status" for t, _ in FakeMcp.args)
+    monkeypatch.setenv("NEATLOGS_USER_EMAIL", "team@example.com")
+    assert neatlogs_link.update_fix("s1", "resolved", mcp=mcp) is True
+    assert ("triage_update_status", {"triage_id": "s1", "user_email": "team@example.com", "status": "resolved"}) in FakeMcp.args
 
 
 def test_unreachable_neatlogs_never_stops_the_diagnosis():
