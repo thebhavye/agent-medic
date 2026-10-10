@@ -157,3 +157,9 @@ def test_wheel_ships_the_page(tmp_path):
         shutil.rmtree(root / "build", ignore_errors=True)
     wheel = next(tmp_path.glob("agent_medic-*.whl"))
     assert "medic/dashboard.html" in zipfile.ZipFile(wheel).namelist()
+
+
+def test_port_reuse_is_off_only_on_windows():
+    import sys
+    # Windows reuse allows double binds; Linux reuse only lets a systemd restart skip TIME_WAIT.
+    assert dashboard.Server.allow_reuse_address is (not sys.platform.startswith("win"))

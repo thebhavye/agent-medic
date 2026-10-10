@@ -329,7 +329,7 @@ function headline(){
     sub:"candidate " + short(ro.candidate) + " · " + (ro.canary_traces || 0) + " canary traces so far · started " + clock(ro.started)};
   if (inc) return {kind: inc.phase === "open" || inc.phase === "triaged" ? "bad" : "warn", tag:"Incident",
     text: (PHASE_LABEL[inc.phase] || inc.phase) + ": " + (inc.symptom || "production is failing"),
-    sub:"incident " + inc.id + " · opened " + clock(inc.opened_at) + " · " + dur(DATA.generated_at - inc.opened_at) + " ago"};
+    sub:["incident " + inc.id + " · opened " + clock(inc.opened_at) + " · ", since(inc.opened_at, "", " ago")]};
   if (last && last.phase === "resolved") {
     var fix = (last.attempts || []).filter(function(a){ return a.accepted; }).pop();
     return {kind:"ok", tag:"Healthy", text:"Production is healthy. Medic healed the last incident in " + dur(last.ended_at - last.opened_at) + ".",
@@ -352,7 +352,7 @@ function renderLive(root){
     h("div", null,
       h("span", {class:"status " + hd.kind}, h("i"), hd.tag),
       h("h1", null, hd.text),
-      h("p", {class:"sub"}, dep ? ["Live release ", sha(dep.sha), " ", dep.subject ? "“" + dep.subject + "”" : "", hd.sub ? " · " + hd.sub : ""] : hd.sub)),
+      h("p", {class:"sub"}, dep ? ["Live release ", sha(dep.sha), " ", dep.subject ? "“" + dep.subject + "”" : "", hd.sub ? [" · ", hd.sub] : ""] : hd.sub)),
     h("div", {class:"kpis"},
       kpi(pct(cur.failure_rate), "failure rate, last " + (cur.n || 0) + " traces", "baseline " + pct(base.failure_rate)),
       kpi(lastCan ? pct(lastCan.pass_rate) : "—", "known-answer eval", lastCan ? lastCan.n + " questions on " + short(lastCan.release)
@@ -502,7 +502,7 @@ function caseFile(inc){
   var picker = list.length > 1 ? h("select", {"aria-label":"choose incident", onchange:function(e){ location.hash = "#live/" + encodeURIComponent(e.target.value); },
       style:"font:inherit;font-size:12.5px;padding:3px 6px;border-radius:7px;border:1px solid var(--line);background:var(--panel);color:var(--ink)"},
     list.map(function(i){ var o = h("option", {value:i.id}, i.id + " · " + (PHASE_LABEL[i.phase] || i.phase)); if (i.id === inc.id) o.selected = true; return o; })) : null;
-  var total = inc.ended_at ? "healed in " + dur(inc.ended_at - inc.opened_at) : "open for " + dur(DATA.generated_at - inc.opened_at);
+  var total = inc.ended_at ? "healed in " + dur(inc.ended_at - inc.opened_at) : since(inc.opened_at, "open for ", "");
   if (inc.phase === "escalated") total = "escalated after " + dur(inc.ended_at - inc.opened_at);
 
   var rail = h("div", {class:"rail"}, (inc.phases || []).map(function(p){
@@ -514,7 +514,7 @@ function caseFile(inc){
     detectStage(inc), diagnoseStage(inc), repairStage(inc), canaryStage(inc), healStage(inc),
     keyedDetails("log:" + inc.id, "Full incident log (" + (inc.timeline || []).length + " events)", h("div", {class:"log", style:"margin-top:8px"},
       (inc.timeline || []).map(function(e){ return h("div", null, h("span", {class:"mono faint"}, "+" + dur(e.t - inc.opened_at)), h("span", {class:"p"}, PHASE_LABEL[e.phase] || e.phase), h("span", null, e.msg)); })))];
-  return card("Incident " + inc.id, "opened " + day(inc.opened_at) + " · " + total, body, picker);
+  return card("Incident " + inc.id, ["opened " + day(inc.opened_at) + " · ", total], body, picker);
 }
 
 function detectStage(inc){
@@ -755,11 +755,22 @@ function tick(){
     delete next.generated_at;
     var key = JSON.stringify(next);
     next.generated_at = at;
+    SKEW = at - Date.now() / 1000;
     if (key !== LAST) { LAST = key; DATA = next; render(); }
     else DATA.generated_at = at;
   }).catch(function(){}).finally(function(){ setTimeout(tick, 3000); });
 }
+// "Open for" / "ago" labels count up on their own, without rebuilding the page.
+var SKEW = 0;
+function since(t, before, after){
+  return h("span", {class:"rel", "data-t": t, "data-b": before, "data-a": after},
+    before + dur(DATA.generated_at - t) + after);
+}
 setInterval(function(){
+  var now = Date.now() / 1000 + SKEW;
+  document.querySelectorAll(".rel").forEach(function(el){
+    el.textContent = el.dataset.b + dur(now - Number(el.dataset.t)) + el.dataset.a;
+  });
   var age = FETCHED ? Math.round((Date.now() - FETCHED) / 1000) : null;
   document.getElementById("age").textContent = age == null ? "connecting…" : age < 5 ? "live" : "last update " + age + "s ago";
   document.getElementById("dot").classList.toggle("stale", age == null || age > 10);

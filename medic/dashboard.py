@@ -15,6 +15,7 @@ import difflib
 import json
 import re
 import subprocess
+import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -304,8 +305,9 @@ class Handler(BaseHTTPRequestHandler):
 
 class Server(ThreadingHTTPServer):
     # On Windows, address reuse lets a second server bind a port that's already serving, and
-    # requests then land on either one. Fail loudly instead.
-    allow_reuse_address = False
+    # requests then land on either one: fail loudly instead. On Linux reuse only skips
+    # TIME_WAIT, which a quick systemd restart needs, so keep it there.
+    allow_reuse_address = not sys.platform.startswith("win")
 
 
 def serve(port: int, medic_dir: Path, host: str = "127.0.0.1") -> None:
