@@ -34,6 +34,10 @@ SCENARIOS = {
     "retry_loop": {"fault": ("release", ["careers", "double-check", "rename-title"]), "cause": "code_regression",
                    "remedy": "code_fix", "culprit": "double-check", "outcome": "resolved",
                    "story": "A deploy bundles three commits; one tells the agent to re-verify every fact."},
+    "truncated_docs": {"fault": ("release", ["docs", "cap-docs", "rename-title"]), "cause": "code_regression",
+                       "remedy": "code_fix", "culprit": "cap-docs", "outcome": "resolved",
+                       "story": "A deploy bundles three commits; one caps read_doc output at 300 characters to save "
+                                "tokens. Nothing errors: answers just lose their facts."},
     "outage": {"fault": ("chaos", "outage"), "cause": "dependency_outage", "remedy": "escalate",
                "outcome": "escalated",
                "story": "The knowledge-base API goes down. There is no code fix; Medic should page a human."},
@@ -121,7 +125,7 @@ def drive(scenario: str, workdir: Path) -> dict:
         found = incidents.load_all()
         inc = found[0] if found else None
         for _ in range(10):       # advance phases that don't need new traffic
-            if not inc or not inc.is_open or inc.phase == "deployed":
+            if not inc or not inc.is_open or inc.phase in ("deployed", "canary"):
                 break
             tick()
             inc = incidents.load_all()[0]
