@@ -69,6 +69,27 @@ def test_model_and_backend_outages_never_remove_working_aid(armed):  # noqa: F81
     assert run_request({"query": "after the outage"}) == "after the outage"
 
 
+def test_a_missing_document_escaping_the_request_is_a_code_failure(armed):  # noqa: F811
+    publish, tmp = armed
+    publish()
+
+    class NotFound(Exception):
+        def __init__(self):
+            super().__init__("404 Not Found: document 'pilot-plnt' does not exist")
+            self.response = type("R", (), {"status_code": 404})()
+
+    def wrong_id():
+        raise NotFound()                                                 # changed code built a bad id
+    for _ in range(core.TRIP_FAILURES):
+        try:
+            with medic.request():
+                medic.guard_tool("read", {"id": "pilot-plnt"}, wrong_id)
+        except Exception:  # noqa: BLE001 - the caller lets it escape
+            pass
+    state = json.loads((tmp / "state.json").read_text())
+    assert state["b" * 12]["status"] == "engaged"                       # counted, so the standby engaged
+
+
 def test_targeted_bundle_replaces_the_automatic_engagement(armed, monkeypatch):  # noqa: F811
     publish, tmp = armed
     publish(functions={"lookup": {"source": "def lookup(args):\n    return args['query']\n"}},

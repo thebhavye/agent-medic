@@ -408,7 +408,10 @@ def request():
     try:
         yield
     except Exception as exc:
-        if outage(exc):
+        # Only real dependency failures here. Model-error text ("404", "not found") is matched
+        # inside call_model(), where it can only mean the model; at this boundary the same words
+        # may be a missing document that changed code asked for, which is a code failure.
+        if dependency_down(exc):
             scope["outage"] = True
         else:
             scope["failed"] = True
