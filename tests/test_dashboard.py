@@ -215,3 +215,12 @@ def test_port_reuse_is_off_only_on_windows():
     import sys
     # Windows reuse allows double binds; Linux reuse only lets a systemd restart skip TIME_WAIT.
     assert dashboard.Server.allow_reuse_address is (not sys.platform.startswith("win"))
+
+
+@pytest.mark.parametrize("fa,status", [
+    ("{status: 'active', expires_at: 2000}", "active"),
+    ("{status: 'active', expires_at: 500}", "expired"),         # the runtime stopped applying it
+    ("{status: 'removed', expires_at: 500}", "removed"),
+])
+def test_expired_first_aid_is_not_shown_as_active(fa, status):
+    assert run_js(f"faStatus({fa})", "faStatus", prelude="var DATA = {generated_at: 1000};") == status

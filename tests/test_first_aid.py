@@ -151,3 +151,39 @@ def test_promoting_the_cure_removes_first_aid(medic, monkeypatch):
     monkeypatch.setattr(agent_mod.remedy, "deploy", lambda inc: {"deployed": True, "release": "f" * 40})
     m._promote(inc)
     assert inc.first_aid["status"] == "removed" and first_aid.active() is None
+
+
+def test_a_failed_trial_never_blocks_the_cure(medic, monkeypatch):
+    import subprocess as sp
+    m, inc, _, _ = medic
+
+    def timeout(*a, **k):
+        raise sp.TimeoutExpired("run_eval", 1800)
+    monkeypatch.setattr(agent_mod.canary, "evaluate", timeout)
+    m._first_aid(inc)                                       # must not raise: do_decide goes on
+    assert inc.first_aid["status"] == "error" and "TimeoutExpired" in inc.first_aid["reason"]
+    assert first_aid.active() is None
+
+
+def test_aided_traces_never_mark_a_release_healthy(tmp_path, monkeypatch):
+    from medic import watcher as watcher_mod
+    from medic.evidence import TraceEvidence
+    monkeypatch.setattr(paths, "MEDIC_DIR", tmp_path)        # no live bundle: the old traces must decide
+    monkeypatch.setattr(watcher_mod, "save_state", lambda st: None)
+
+    def ev(i, aided):
+        return TraceEvidence(trace_id=f"t{i}", started_at="2026-10-10T00:00:00Z", release="b" * 12, status="OK",
+                             cost_usd=0, tokens=100, tool_calls=2, duration_ms=10, question="q", answer="Narvik",
+                             first_aid=["function:read_doc"] if aided else [])
+    w = watcher_mod.Watcher.__new__(watcher_mod.Watcher)
+    w.log = lambda *a: None
+    w.state = {"baseline": {"n": 6, "failure_rate": 0.0, "tool_error_rate": 0.0, "non_answer_rate": 0.0,
+                            "tokens_per_run": 100, "tool_calls_per_run": 2, "repeated_call_rate": 0.0},
+               "healthy_release": "a" * 12, "canary": []}
+    evs = [ev(i, aided=(i == 0)) for i in range(watcher_mod.RECENT)]
+    monkeypatch.setattr(w, "recent", lambda release=None: evs, raising=False)
+    w.check()
+    assert w.state["healthy_release"] == "a" * 12           # one aided trace in the window: not proof
+    evs[:] = [ev(i, aided=False) for i in range(watcher_mod.RECENT)]
+    w.check()
+    assert w.state["healthy_release"] == "b" * 12

@@ -3,7 +3,9 @@
 Environment:
     MEDIC_CONTROL          path or http(s) URL of the first-aid bundle (unset: no first aid)
     MEDIC_RELEASE          this process's release sha; a bundle applies only to its own release
-    MEDIC_RUNTIME_KEY      shared secret; required for URLs, and when set every bundle must be signed
+    MEDIC_RUNTIME_KEY      shared secret that signs bundles; required for URLs, and when set every
+                           bundle must be signed. It is never sent anywhere.
+    MEDIC_CONTROL_TOKEN    optional bearer token for fetching a remote bundle (HTTPS, or HTTP to loopback)
     MEDIC_FALLBACK_MODELS  comma-separated models to try when the configured one is unavailable
 """
 
@@ -17,9 +19,12 @@ import os
 import re
 import threading
 import time
+import urllib.parse
 import urllib.request
 
 from medic_runtime import bundle as _bundle
+
+LOOPBACK = {"127.0.0.1", "localhost", "::1"}
 
 CACHE_S = 5.0             # how often the bundle is re-read
 LOOP_LIMIT = 2            # identical tool calls allowed per request before the guard steps in
@@ -48,11 +53,19 @@ _request = contextvars.ContextVar("medic_request", default=None)
 
 # -- the bundle ---------------------------------------------------------------------------
 
+def _remote_allowed(source: str) -> bool:
+    """HTTPS anywhere; plain HTTP only to this machine."""
+    parsed = urllib.parse.urlparse(source)
+    return parsed.scheme == "https" or (parsed.scheme == "http" and parsed.hostname in LOOPBACK)
+
+
 def _read(source: str, key: str | None) -> dict | None:
     if source.startswith(("http://", "https://")):
-        if not key:
-            return None                 # a remote bundle must be signed
-        req = urllib.request.Request(source, headers={"Authorization": f"Bearer {key}"})
+        if not key or not _remote_allowed(source):
+            return None                 # a remote bundle must be signed, and fetched over TLS
+        # The signing key never leaves this process; fetching uses its own optional token.
+        token = os.environ.get("MEDIC_CONTROL_TOKEN")
+        req = urllib.request.Request(source, headers={"Authorization": f"Bearer {token}"} if token else {})
         with urllib.request.urlopen(req, timeout=3) as resp:
             doc = json.loads(resp.read().decode("utf-8"))
     else:
@@ -159,8 +172,8 @@ def surface(name: str):
             if patch:
                 try:
                     healthy = _compile(name, patch["source"], fn)
-                except (SyntaxError, ValueError, KeyError, TypeError):
-                    healthy = None      # a bad patch never takes the agent down: run the original
+                except Exception:  # noqa: BLE001 - incl. NameError while the def runs (a default or
+                    healthy = None  # annotation the culprit removed): a bad patch runs the original
                 if healthy is not None:
                     _report("function", name, f"running {name} from release {str(patch.get('from_release', ''))[:8]}")
                     return healthy(*args, **kwargs)
@@ -215,13 +228,28 @@ def guard_tool(name: str, args, run):
         result = run()
     except FirstAidError:
         raise
-    except Exception:
-        state["failures"] += 1
-        if state["failures"] >= BREAKER_FAILURES:
-            state["open_until"] = time.time() + BREAKER_COOLDOWN_S
+    except Exception as exc:
+        # Only "the dependency is down" counts toward the shared breaker. A bad argument or a
+        # missing document is that call's problem; it must not cut the tool off for everyone.
+        if dependency_down(exc):
+            state["failures"] += 1
+            if state["failures"] >= BREAKER_FAILURES:
+                state["open_until"] = time.time() + BREAKER_COOLDOWN_S
         raise
     state["failures"] = 0
     return result
+
+
+DOWN_TYPES = {"ConnectError", "ConnectTimeout", "ReadTimeout", "WriteTimeout", "PoolTimeout", "TimeoutException",
+              "RemoteProtocolError", "ServiceUnavailable", "APIConnectionError", "APITimeoutError"}
+
+
+def dependency_down(exc: BaseException) -> bool:
+    """Connection failures, timeouts and 5xx responses: the tool's backend can't serve anyone."""
+    if isinstance(exc, (ConnectionError, TimeoutError)) or type(exc).__name__ in DOWN_TYPES:
+        return True
+    status = getattr(getattr(exc, "response", None), "status_code", None) or getattr(exc, "status_code", None)
+    return isinstance(status, int) and status >= 500
 
 
 def call_model(fn, model: str):

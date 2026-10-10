@@ -333,7 +333,7 @@ function headline(){
   var ro = DATA.rollout, inc = openIncident(), last = (DATA.incidents || [])[0];
   if (ro) return {kind:"warn", tag:"Canary", text:"A Medic fix is serving " + pct(ro.share) + " of production",
     sub:"candidate " + short(ro.candidate) + " · " + (ro.canary_traces || 0) + " canary traces so far · started " + clock(ro.started)};
-  if (inc && (inc.first_aid || {}).status === "active") return {kind:"warn", tag:"First aid",
+  if (inc && faStatus(inc.first_aid) === "active") return {kind:"warn", tag:"First aid",
     text:"Users are being served by first aid while Medic prepares the cure",
     sub:["incident " + inc.id + " · " + (inc.first_aid.what || "") + " · opened ", since(inc.opened_at, "", " ago")]};
   if (inc) return {kind: inc.phase === "open" || inc.phase === "triaged" ? "bad" : "warn", tag:"Incident",
@@ -590,8 +590,14 @@ function bar(label, frac, color, value){
     h("span", {class:"mono"}, value != null ? String(value) : pct(frac)));
 }
 
+// The stored status only changes on promotion; the runtime drops a bundle once it expires.
+function faStatus(fa){
+  fa = fa || {};
+  return fa.status === "active" && fa.expires_at && fa.expires_at < DATA.generated_at ? "expired" : fa.status;
+}
+
 function firstAidStage(inc){
-  var fa = inc.first_aid || {};
+  var fa = inc.first_aid || {}, status = faStatus(fa);
   if (!fa.status) return stage(3, reached(inc, "decided") ? "done" : "pending", "First aid", null,
     reached(inc, "decided") ? "Not needed for this cause: the cure goes straight ahead." :
       "As soon as the culprit is known, Medic stands in its healthy version so users are served while the cure is made.", null);
@@ -601,7 +607,8 @@ function firstAidStage(inc){
     removed: "Users were served by the culprit's healthy version until the cure went live; then Medic took it off.",
     rejected: "Medic tried a stand-in, but it did not restore answers on the broken release, so it was not applied.",
     not_possible: "Nothing the agent registered with Medic's runtime could stand in for the culprit; users wait for the cure.",
-    error: "First aid could not be planned; the cure goes ahead."}[fa.status] || "";
+    expired: "First aid expired before the cure was live: users are on the broken release again until it ships.",
+    error: "First aid failed; the cure goes ahead."}[status] || "";
   var body = [];
   if (fa.what && fa.what !== "nothing") body.push(h("div", {class:"box sunk"}, h("h4", null, "Stood in"), fa.what,
     fa.base ? h("div", {class:"faint", style:"font-size:12px;margin-top:4px"}, ["from ", sha(fa.base), ", the culprit's parent: nothing else that shipped with it is undone"]) : null));
@@ -612,12 +619,14 @@ function firstAidStage(inc){
       (trial.tool_calls_per_run != null && before.tool_calls_per_run != null ? " · tool calls per run " +
         (+before.tool_calls_per_run).toFixed(1) + " → " + (+trial.tool_calls_per_run).toFixed(1) : ""))));
   if (fa.reason) body.push(h("p", {class:"muted", style:"font-size:13px;margin:8px 0 0"}, fa.reason));
-  if (fa.status === "active") body.push(h("div", {class:"outcome warn"}, h("span", {class:"ic"}, "+"),
+  if (status === "active") body.push(h("div", {class:"outcome warn"}, h("span", {class:"ic"}, "+"),
     h("span", null, "Active on ", sha(inc.release), h("span", {class:"muted", style:"font-weight:400"},
       " · bound to that release, signed, expires " + clock(fa.expires_at)))));
-  if (fa.status === "removed") body.push(h("div", {class:"outcome ok"}, h("span", {class:"ic"}, "✓"),
+  if (status === "expired") body.push(h("div", {class:"outcome bad"}, h("span", {class:"ic"}, "!"),
+    h("span", null, "Expired at " + clock(fa.expires_at) + "; no longer applied")));
+  if (status === "removed") body.push(h("div", {class:"outcome ok"}, h("span", {class:"ic"}, "✓"),
     h("span", null, "Removed at " + clock(fa.removed_at) + ": the cure is live")));
-  var state = {active:"now", removed:"done", rejected:"fail", not_possible:"done", error:"fail"}[fa.status] || "done";
+  var state = {active:"now", removed:"done", rejected:"fail", not_possible:"done", expired:"fail", error:"fail"}[status] || "done";
   return stage(3, state, "First aid", fa.applied_at ? "live " + dur(fa.applied_at - inc.opened_at) + " after detection" : null, lede, body);
 }
 

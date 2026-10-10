@@ -130,3 +130,70 @@ def test_model_fallback_only_for_unavailable_models(control, monkeypatch):
         raise ValueError("invalid tool schema")             # a real bug: no fallback hides it
     with pytest.raises(ValueError):
         medic.call_model(bad_request, "model-a")
+
+
+def test_a_patch_that_fails_while_defining_runs_the_original(control):
+    # The healthy version's default refers to a name the culprit removed: NameError inside exec.
+    control(functions={"cap": {"source": "def capped(text: str = REMOVED_DEFAULT) -> str:\n    return text\n"}})
+    assert capped("abcdef") == "abc"
+
+
+def test_remote_bundles_need_tls_and_never_carry_the_signing_key(monkeypatch):
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    seen = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            seen.append(self.headers.get("Authorization"))
+            body = json.dumps(bundle.sign({"release": "b" * 12, "expires_at": time.time() + 60,
+                                           "values": {"prompt": "remote"}}, "secret")).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        monkeypatch.setenv("MEDIC_RELEASE", "b" * 12)
+        monkeypatch.setenv("MEDIC_RUNTIME_KEY", "secret")
+        monkeypatch.setenv("MEDIC_CONTROL", f"http://127.0.0.1:{server.server_address[1]}/bundle")
+        monkeypatch.setenv("MEDIC_CONTROL_TOKEN", "fetch-token")
+        medic.reset()
+        assert medic.value("prompt", "live") == "remote"            # loopback HTTP is fine
+        assert seen == ["Bearer fetch-token"]                        # the fetch token, not the signing key
+        monkeypatch.setenv("MEDIC_CONTROL", "http://example.com/bundle")
+        medic.reset()
+        assert medic.value("prompt", "live") == "live"              # plain HTTP off-box is refused
+        assert len(seen) == 1
+    finally:
+        server.shutdown()
+        medic.reset()
+
+
+class _HTTPError(Exception):
+    def __init__(self, status):
+        super().__init__(f"HTTP {status}")
+        self.response = type("R", (), {"status_code": status})()
+
+
+@pytest.mark.parametrize("exc,opens", [
+    (KeyError("doc_id"), False),                 # a bad argument: that call's problem
+    (_HTTPError(404), False),                    # a missing document
+    (_HTTPError(503), True),                     # the backend is down
+    (ConnectionError("refused"), True),
+])
+def test_only_dependency_failures_open_the_shared_breaker(control, exc, opens):
+    def fail():
+        raise exc
+    for _ in range(core.BREAKER_FAILURES):
+        with pytest.raises(type(exc)):
+            medic.guard_tool("read_doc", {}, fail)
+    if opens:
+        with pytest.raises(medic.FirstAidError):
+            medic.guard_tool("read_doc", {}, lambda: "ok")
+    else:
+        assert medic.guard_tool("read_doc", {}, lambda: "ok") == "ok"

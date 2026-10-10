@@ -138,7 +138,10 @@ class Watcher:
             return [], current
         signals = compare(self.state["baseline"], current)
         # Under first aid a broken release looks healthy: its traces are the bandage's, not its own.
-        if (not signals and len(current["releases"]) == 1 and first_aid.active() is None
+        # Judge by the traces themselves (an expired bundle leaves aided traces behind), and by
+        # whether a bundle is live now (an aided trace may not show its span yet).
+        aided = any(e.first_aid for e in recent)
+        if (not signals and len(current["releases"]) == 1 and not aided and first_aid.active() is None
                 and self._answers_verified(current["releases"][0])):
             self.state["healthy_release"] = current["releases"][0]
             save_state(self.state)

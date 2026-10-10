@@ -157,12 +157,18 @@ class Medic:
             self._first_aid(inc)
 
     def _first_aid(self, inc: Incident) -> None:
-        """Serve users with the culprit's healthy parts while the cure is made (medic/first_aid.py)."""
+        """Serve users with the culprit's healthy parts while the cure is made (medic/first_aid.py).
+
+        Best effort: whatever fails here (planning, the trial eval, publishing) is recorded and the
+        incident moves on to the cure. First aid must never hold the cure back."""
         try:
-            p = first_aid.plan(paths.DEPLOY, inc.release, inc.healthy_release, inc.decision.get("culprit"))
-        except Exception as exc:  # noqa: BLE001 - first aid is best effort; the cure still runs
-            inc.first_aid = {"status": "error", "reason": f"{type(exc).__name__}: {exc}"}
-            return
+            self._attempt_first_aid(inc)
+        except Exception as exc:  # noqa: BLE001
+            inc.first_aid = {**inc.first_aid, "status": "error", "reason": f"{type(exc).__name__}: {exc}"}
+            inc.note("first_aid", f"first aid failed ({type(exc).__name__}); going on to the cure", self.log)
+
+    def _attempt_first_aid(self, inc: Incident) -> None:
+        p = first_aid.plan(paths.DEPLOY, inc.release, inc.healthy_release, inc.decision.get("culprit"))
         if first_aid.empty(p):
             reason = "; ".join(p["skipped"]) or "the culprit changed nothing the agent registered with the runtime"
             inc.first_aid = {"status": "not_possible", "reason": reason, "registered": p["registered"]}
