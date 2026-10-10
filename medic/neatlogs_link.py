@@ -181,17 +181,24 @@ def setup(api: Api, baseline: dict | None = None, webhook_url: str | None = None
 
 # -- the trigger --------------------------------------------------------------------------
 
-def new_alerts(api: Api, state: dict | None = None) -> list[dict]:
-    """Alert fires from Medic's own rules that Medic hasn't seen yet, oldest first."""
+MAX_ALERT_AGE_S = 900    # an alert older than this describes some earlier moment, not now
+
+
+def new_alerts(api: Api, state: dict | None = None, since: float = 0.0) -> list[dict]:
+    """Fires of Medic's own rules that Medic hasn't seen, that fired after `since` (when this
+    Medic started watching) and in the last few minutes; oldest first. Older fires are marked
+    seen without acting on them: a stale alert must never open an incident."""
     state = state if state is not None else load()
     ours = set((state.get("rules") or {}).values())
     if not ours:
         return []
     seen = set(state.get("seen_alerts") or [])
     fires = api.call("GET", "/alert-history", limit=25).get("alertHistory", [])
-    fresh = [f for f in fires if f.get("ruleId") in ours and f["id"] not in seen and not f.get("isFollowup")]
-    if fresh:
-        state["seen_alerts"] = sorted(seen | {f["id"] for f in fresh})[-500:]
+    unseen = [f for f in fires if f.get("ruleId") in ours and f["id"] not in seen and not f.get("isFollowup")]
+    cutoff = max(since, time.time() - MAX_ALERT_AGE_S)
+    fresh = [f for f in unseen if _iso_ts(f.get("firedAt")) >= cutoff]
+    if unseen:
+        state["seen_alerts"] = sorted(seen | {f["id"] for f in unseen})[-500:]
         save(state)
     return sorted(fresh, key=lambda f: f.get("firedAt", ""))
 

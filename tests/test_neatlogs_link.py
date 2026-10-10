@@ -76,18 +76,36 @@ def test_setup_creates_detections_rules_and_webhook_once(nl):
     assert (len(fake.detections), len(fake.rules), len(fake.webhooks)) == before   # idempotent
 
 
+def iso(offset_s: float) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(time.time() + offset_s))
+
+
 def test_new_alerts_are_ours_unseen_and_not_followups(nl):
     fake, api = nl
     state = neatlogs_link.setup(api, log=lambda m: None)
     ours = state["rules"]["tool_failed"]
     fake.history[:] = [
-        {"id": "a1", "ruleId": ours, "ruleName": "Medic: tool call failed (3 in 5 min)", "firedAt": "2026-10-10T12:00:00Z",
+        {"id": "a1", "ruleId": ours, "ruleName": "Medic: tool call failed (3 in 5 min)", "firedAt": iso(-30),
          "count": 4, "threshold": 3, "sampleTraceIds": ["t1", "t2"], "isFollowup": False},
-        {"id": "a2", "ruleId": "someone-elses-rule", "firedAt": "2026-10-10T12:01:00Z"},
-        {"id": "a3", "ruleId": ours, "firedAt": "2026-10-10T12:02:00Z", "isFollowup": True},
+        {"id": "a2", "ruleId": "someone-elses-rule", "firedAt": iso(-20)},
+        {"id": "a3", "ruleId": ours, "firedAt": iso(-10), "isFollowup": True},
     ]
     assert [a["id"] for a in neatlogs_link.new_alerts(api)] == ["a1"]
     assert neatlogs_link.new_alerts(api) == []                                # seen
+
+
+def test_stale_alerts_never_open_an_incident(nl):
+    # The live run-2 bug: alerts from an earlier run, never consumed, opened an incident before
+    # any fault. Alerts from before Medic started, or older than a few minutes, are only marked seen.
+    fake, api = nl
+    state = neatlogs_link.setup(api, log=lambda m: None)
+    ours = state["rules"]["tool_failed"]
+    started = time.time() - 60
+    fake.history[:] = [{"id": "old-run", "ruleId": ours, "firedAt": iso(-300)},          # before this Medic
+                       {"id": "ancient", "ruleId": ours, "firedAt": iso(-3600)},
+                       {"id": "now", "ruleId": ours, "firedAt": iso(-5)}]
+    assert [a["id"] for a in neatlogs_link.new_alerts(api, since=started)] == ["now"]
+    assert {"old-run", "ancient", "now"} <= set(neatlogs_link.load()["seen_alerts"])
 
 
 def test_medic_opens_its_incident_from_the_neatlogs_alert(nl, monkeypatch):

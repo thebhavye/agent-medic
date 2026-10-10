@@ -28,6 +28,7 @@ class Medic:
         self.watcher = Watcher(reader, log=log)
         self.auto_deploy = auto_deploy
         self.log = log
+        self.started_at = time.time()      # neatlogs alerts from before this are not about now
 
     def tick(self) -> None:
         added = self.watcher.poll()
@@ -82,7 +83,7 @@ class Medic:
         if api is None:
             return []
         try:
-            return neatlogs_link.new_alerts(api)
+            return neatlogs_link.new_alerts(api, since=getattr(self, "started_at", 0.0))
         except Exception as exc:  # noqa: BLE001 - neatlogs down: Medic's own signals still work
             self.log(f"[neatlogs] alert history unavailable: {type(exc).__name__}: {exc}")
             return []
