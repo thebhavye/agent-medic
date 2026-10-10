@@ -1,0 +1,16 @@
+[Unit]
+Description=Agent Medic production traffic
+After=medic-kb.service medic-world-init.service
+Requires=medic-kb.service
+
+[Service]
+Restart=always
+RestartSec=10
+User=medic
+WorkingDirectory=/opt/agent-medic
+EnvironmentFile=/opt/agent-medic/.env
+Environment=LLM_PROVIDER=ollama_cloud
+ExecStart=/opt/agent-medic/.venv/bin/python -m medic.cli traffic --interval 20 --size 3
+
+[Install]
+WantedBy=multi-user.target

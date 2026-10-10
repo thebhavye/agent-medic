@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the Agent Medic chaos scenario every 2 hours
+
+[Timer]
+OnBootSec=30min
+OnUnitActiveSec=2h
+Unit=medic-chaos.service
+
+[Install]
+WantedBy=timers.target

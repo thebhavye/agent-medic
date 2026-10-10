@@ -1,0 +1,17 @@
+[Unit]
+Description=Agent Medic live dashboard
+After=network.target
+# Nothing depends on this unit, so it can never break the other services.
+# The ExecCondition below skips it cleanly if the dashboard module is absent.
+
+[Service]
+Restart=always
+RestartSec=5
+User=medic
+WorkingDirectory=/opt/agent-medic
+EnvironmentFile=/opt/agent-medic/.env
+ExecCondition=/opt/agent-medic/.venv/bin/python -c "import medic.dashboard"
+ExecStart=/opt/agent-medic/.venv/bin/python -m medic.dashboard --port 8790
+
+[Install]
+WantedBy=multi-user.target
