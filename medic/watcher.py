@@ -137,7 +137,17 @@ class Watcher:
                          "dependency contract recorded")
             return [], current
         signals = compare(self.state["baseline"], current)
-        if not signals and len(current["releases"]) == 1:
+        if not signals and len(current["releases"]) == 1 and self._answers_verified(current["releases"][0]):
             self.state["healthy_release"] = current["releases"][0]
             save_state(self.state)
         return signals, current
+
+    def _answers_verified(self, release: str) -> bool:
+        """Clean traces aren't enough to call a release healthy: wrong-but-confident answers
+        look clean. Once the canary is in use, a release must also pass a canary run of its own."""
+        runs = self.state.get("canary") or []
+        if not runs:
+            return True            # canary not in use: traces are all we have
+        mine = [r for r in runs if r.get("release") == release[:12] and "pass_rate" in r]
+        base = self.state.get("canary_baseline") or 0
+        return bool(mine) and mine[-1]["pass_rate"] >= base - 0.25

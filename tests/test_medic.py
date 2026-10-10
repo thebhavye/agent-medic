@@ -107,3 +107,17 @@ def test_stale_data_is_a_content_change_and_escalates(kb_url, chaos):
     assert finding["verdict"] == "content_changed"
     d = coordinator.decide({}, {"dependency": finding, "regression": {"verdict": "no_code_change", "detail": "y"}})
     assert d["cause"] == "dependency_data" and d["remedy"] == "escalate"
+
+
+def test_release_is_healthy_only_after_its_own_canary(tmp_path, monkeypatch):
+    from medic import paths, watcher as w
+    monkeypatch.setattr(paths, "STATE", tmp_path / "state.json")
+    wt = w.Watcher(reader=None, log=lambda m: None)
+    wt.state["baseline"] = {"failure_rate": 0}
+    assert wt._answers_verified("abc")                       # no canary in use: traces decide
+    wt.state.update(canary=[{"release": "old", "pass_rate": 1.0}], canary_baseline=1.0)
+    assert not wt._answers_verified("newrelease123")          # no canary on the new release yet
+    wt.state["canary"].append({"release": "newrelease12", "pass_rate": 0.0})
+    assert not wt._answers_verified("newrelease123")          # canary failed on it
+    wt.state["canary"].append({"release": "newrelease12", "pass_rate": 1.0})
+    assert wt._answers_verified("newrelease123")

@@ -5,18 +5,20 @@ phase, and open a new incident if the latest window drifted from the baseline. A
 on disk, so Medic can be stopped and restarted at any point.
 """
 
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 
 import neatlogs
 
-from medic import anatomy, canary, coordinator, incidents, localize, paths, remedy, triage, world
+from medic import anatomy, canary, coordinator, incidents, localize, paths, remedy, rollout, triage, world
 from medic.incidents import Incident
 from medic.investigators import dependency, loops, regression
 from medic.watcher import RECENT, Signal, Watcher, compare, save_state
 from medic import evidence
 
 MONITOR_TIMEOUT_S = 1800
+ROLLOUT = os.environ.get("MEDIC_ROLLOUT", "canary")    # canary | direct
 
 
 class Medic:
@@ -83,7 +85,8 @@ class Medic:
 
     def step(self, inc: Incident) -> None:
         handler = {"open": self.do_triage, "triaged": self.do_investigate, "investigated": self.do_decide,
-                   "decided": self.do_remedy, "remedied": self.do_deploy, "deployed": self.do_monitor}[inc.phase]
+                   "decided": self.do_remedy, "remedied": self.do_deploy, "canary": self.do_canary,
+                   "deployed": self.do_monitor}[inc.phase]
         with neatlogs.trace(f"medic:{inc.phase}", kind="AGENT", session_id=f"incident-{inc.id}",
                             incident_id=inc.id, phase=inc.phase):
             handler(inc)
@@ -167,6 +170,32 @@ class Medic:
         if not self.auto_deploy:
             if not inc.deploy.get("approved"):
                 return       # waiting for `agent-medic approve <id>`
+        if ROLLOUT == "canary" and not rollout.current():
+            state = rollout.start(inc.id, inc.remedy["branch"])
+            inc.deploy = {**inc.deploy, "canary": state, "at": time.time()}
+            inc.note("canary", f"candidate {state['candidate'][:8]} serves {state['share']:.0%} of production; "
+                               f"{rollout.MIN_TRACES} canary traces decide promote or roll back", self.log)
+            inc.phase = "canary"
+            return
+        self._promote(inc)
+
+    def do_canary(self, inc: Incident) -> None:
+        verdict = rollout.judge(self.watcher, compare)
+        if verdict is None:
+            return                    # waiting for canary traffic
+        inc.deploy["canary_verdict"] = {k: v for k, v in verdict.items() if k != "state"}
+        if verdict["verdict"] == "regressed":
+            rollout.finish()
+            last = inc.remedy["attempts"][-1]
+            last.update(accepted=False, feedback=f"rolled back: in production the canary regressed: {verdict['detail']}")
+            inc.note("canary", f"rolled back automatically: {verdict['detail']}", self.log)
+            inc.phase = "escalated" if len(inc.remedy["attempts"]) >= remedy.MAX_ATTEMPTS else "decided"
+            return
+        inc.note("canary", f"canary {verdict['verdict']}: {verdict['detail']}; promoting", self.log)
+        rollout.finish()
+        self._promote(inc)
+
+    def _promote(self, inc: Incident) -> None:
         inc.deploy = {**inc.deploy, **remedy.deploy(inc), "at": time.time()}
         if inc.deploy["deployed"]:
             inc.note("deployed", f"release {inc.deploy['release'][:8]} is live", self.log)

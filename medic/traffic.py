@@ -11,11 +11,12 @@ import subprocess
 import sys
 import time
 
-from medic import paths, world
+from medic import paths, rollout
 
 
 def run_batch(size: int, workers: int) -> dict:
-    sha = world.head()
+    # During a canary rollout, a share of batches runs the candidate release instead.
+    code_dir, sha = rollout.route()
     cases = [json.loads(line) for line in paths.CASES.read_text(encoding="utf-8").splitlines() if line]
     batch = random.sample(cases, min(size, len(cases)))
     paths.TRAFFIC.mkdir(parents=True, exist_ok=True)
@@ -26,8 +27,8 @@ def run_batch(size: int, workers: int) -> dict:
     cmd = [sys.executable, "-m", "target_agent.run_eval", "--cases", str(cases_file), "--out", str(out_file),
            "--session", f"prod-{sha[:8]}-{stamp}", "--tag", "env:prod", "--tag", f"release:{sha[:12]}",
            "--workers", str(workers)]
-    env = {**os.environ, "PYTHONPATH": str(paths.DEPLOY), "KB_URL": paths.KB_URL}
-    subprocess.run(cmd, cwd=paths.DEPLOY, env=env, capture_output=True, timeout=1800)
+    env = {**os.environ, "PYTHONPATH": str(code_dir), "KB_URL": paths.KB_URL}
+    subprocess.run(cmd, cwd=code_dir, env=env, capture_output=True, timeout=1800)
     results = json.loads(out_file.read_text(encoding="utf-8"))["cases"] if out_file.exists() else []
     return {"release": sha[:8], "n": len(results), "passed": sum(r["passed"] for r in results)}
 

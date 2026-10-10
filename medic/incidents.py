@@ -1,6 +1,8 @@
 """Incidents: one per detected problem, saved after every phase so Medic resumes after a crash.
 
-    open -> triaged -> investigated -> decided -> remedied -> deployed -> resolved
+    open -> triaged -> investigated -> decided -> remedied -> canary -> deployed -> resolved
+                                           ^                    | regressed in production: rolled back
+                                           +--------------------+
                                           \\-> escalated (no safe automatic fix; a human is needed)
 """
 
@@ -11,7 +13,7 @@ from dataclasses import asdict, dataclass, field
 
 from medic import paths
 
-OPEN_PHASES = ("open", "triaged", "investigated", "decided", "remedied", "deployed")
+OPEN_PHASES = ("open", "triaged", "investigated", "decided", "remedied", "canary", "deployed")
 
 
 @dataclass

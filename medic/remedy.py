@@ -15,7 +15,7 @@ from bisect_agent.edits import EditError, apply_edits
 from bisect_agent.evaluator import Evaluator, SkipCommit, load_cases
 from bisect_agent.metrics import SIGNATURES, Regression, classify
 from bisect_agent.state import RunState
-from medic import paths
+from medic import paths, tournament
 from target_agent.llm import cost_usd
 
 MAX_ATTEMPTS = 3
@@ -96,8 +96,14 @@ def attempt(inc, reader, log=print) -> dict:
     n = len(previous) + 1
     record: dict = {"n": n, "accepted": False}
 
-    prompt = code_prompt(inc, root, previous) if inc.decision["remedy"] == "code_fix" else \
-        dependency_prompt(inc, root, previous)
+    def base_prompt(r: Path) -> str:
+        return code_prompt(inc, r, previous) if inc.decision["remedy"] == "code_fix" else \
+            dependency_prompt(inc, r, previous)
+
+    if tournament.targets(inc):
+        return _tournament_attempt(inc, reader, root, branch, n, base_prompt, log)
+
+    prompt = base_prompt(root)
     try:
         proposal = fixer.propose_fix(prompt)
     except Exception as exc:   # bad output, timeout or provider error: count it as a failed attempt
@@ -123,17 +129,7 @@ def attempt(inc, reader, log=print) -> dict:
         return record
     record["metrics"] = m.to_dict()
 
-    problems = []
-    if m.pass_rate < HEALTHY["pass_rate"]:
-        problems.append(f"pass rate {m.pass_rate:.0%} is below {HEALTHY['pass_rate']:.0%}")
-    if m.error_rate > HEALTHY["error_rate"]:
-        problems.append(f"{m.error_rate:.0%} of runs still hit errors")
-    reg = inc.findings.get("regression", {})
-    if inc.decision["remedy"] == "code_fix" and reg.get("signature"):
-        value = getattr(m, SIGNATURES[reg["signature"]].metric)
-        if classify(reg["signature"], value, reg["good_value"], reg["bad_value"]) != "good":
-            problems.append(f"{SIGNATURES[reg['signature']].metric} is {value:.4g}, still closer to the bad "
-                            f"value {reg['bad_value']:.4g} than the healthy {reg['good_value']:.4g}")
+    problems = judge(inc, m)
     if problems:
         gitops.git("reset", "--hard", cwd=root)
         record["feedback"] = "; ".join(problems)
@@ -147,6 +143,64 @@ def attempt(inc, reader, log=print) -> dict:
     gitops.git("commit", "-q", "-m", body, cwd=root)
     record.update(accepted=True, commit=gitops.rev_parse("HEAD", root), branch=branch,
                   feedback=f"verified: pass {m.pass_rate:.0%}, errors {m.error_rate:.0%} on {m.n} runs")
+    return record
+
+
+def judge(inc, m) -> list[str]:
+    """Why a verified run still isn't good enough (empty list: it is)."""
+    problems = []
+    if m.pass_rate < HEALTHY["pass_rate"]:
+        problems.append(f"pass rate {m.pass_rate:.0%} is below {HEALTHY['pass_rate']:.0%}")
+    if m.error_rate > HEALTHY["error_rate"]:
+        problems.append(f"{m.error_rate:.0%} of runs still hit errors")
+    reg = inc.findings.get("regression", {})
+    if inc.decision["remedy"] == "code_fix" and reg.get("signature"):
+        value = getattr(m, SIGNATURES[reg["signature"]].metric)
+        if classify(reg["signature"], value, reg["good_value"], reg["bad_value"]) != "good":
+            problems.append(f"{SIGNATURES[reg['signature']].metric} is {value:.4g}, still closer to the bad "
+                            f"value {reg['bad_value']:.4g} than the healthy {reg['good_value']:.4g}")
+    return problems
+
+
+def _tournament_attempt(inc, reader, root: Path, branch: str, n: int, base_prompt, log) -> dict:
+    """One candidate per suspected surface, verified side by side; the best one is committed."""
+    def verify(candidate_root: Path, key: str):
+        ev = Evaluator(candidate_root, RunState(good=inc.healthy_release, bad=inc.release), _verify_cases(inc), reader)
+        try:
+            m = ev.evaluate_dir(candidate_root, key)
+        except SkipCommit as exc:
+            return {}, [f"the patched agent crashed: {exc}"]
+        return m.to_dict(), judge(inc, m)
+
+    result = tournament.run(inc, base_prompt, verify, log)
+    board = [{k: v for k, v in c.items() if k != "root"} for c in result["board"]]
+    record: dict = {"n": n, "accepted": False, "tournament": board,
+                    "fixer_cost_usd": sum(cost_usd((c.get("usage") or {}).get("model", ""),
+                                                   (c.get("usage") or {}).get("input_tokens", 0),
+                                                   (c.get("usage") or {}).get("output_tokens", 0)) for c in board)}
+    w = result["winner"]
+    if not w:
+        record["feedback"] = "no candidate passed: " + "; ".join(
+            f"{tournament._label(c)}: {c['verdict']}" + (f" ({c['feedback'][:100]})" if c.get("feedback") else "")
+            for c in board)
+        return record
+    apply_edits(root, w["edits"])
+    gitops.worktree_remove(Path(w["root"]), paths.DEPLOY)
+    m = w["metrics"]
+    label = tournament._label(w)
+    title = w.get("commit_title") or "Medic fix"
+    body = (f"{title}\n\n{w.get('diagnosis', '')}\n\nIncident: {inc.id}\nCause: {inc.decision['cause']}\n"
+            f"Chosen from {len(board)} candidates: {label} won with pass {m['pass_rate']:.0%}, errors "
+            f"{m['error_rate']:.0%} on {m['n']} runs, {w['changed_lines']} changed lines.\n\n"
+            f"Agent-Medic-Incident: {inc.id}\n")
+    gitops.git("add", "-A", cwd=root)
+    gitops.git("commit", "-q", "-m", body, cwd=root)
+    others = [c for c in board if not c.get("winner")]
+    record.update({k: w.get(k) for k in ("commit_title", "diagnosis", "original_intent", "how_intent_is_kept",
+                                         "edits", "usage")})
+    record.update(accepted=True, commit=gitops.rev_parse("HEAD", root), branch=branch, metrics=m, winner=label,
+                  feedback=f"tournament: {label} won (pass {m['pass_rate']:.0%}, {w['changed_lines']} lines) over "
+                           + (", ".join(f"{tournament._label(c)} [{c['verdict']}]" for c in others) or "no rivals"))
     return record
 
 
