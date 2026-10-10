@@ -12,6 +12,7 @@ from bisect_agent.evaluator import Evaluator, SkipCommit
 from bisect_agent.metrics import SIGNATURES, classify, detect
 from bisect_agent.search import bisect
 from bisect_agent.state import RunState, save
+from medic import anatomy, paths
 
 # Watcher signal -> agent-bisect signature to bisect on.
 SIGNATURE_FOR = {"tool_errors": "errors", "failures": "quality", "quality": "quality", "loops": "tool_calls",
@@ -71,7 +72,10 @@ def investigate(deploy: Path, good: str, bad: str, signal: str, cases: Path, rea
         return {**finding, "verdict": "ambiguous", "confidence": 0.4,
                 "detail": "skipped releases hide the boundary: " + ", ".join(c[:8] for c in result.candidates)}
     intent = entire_ctx.gather_intent(result.culprit, deploy, deploy)
+    surfaces = anatomy.scan(deploy, [f for f in paths.AGENT_FILES if (deploy / f).exists()])
+    changed = anatomy.changed_surfaces(deploy, result.culprit, surfaces)
     return {**finding, "verdict": "culprit", "confidence": 0.9, "signature": reg.signature,
+            "changed_surfaces": changed["surfaces"], "graph_changes": changed["graph"],
             "good_value": reg.good_value, "bad_value": reg.bad_value, "culprit": result.culprit,
             "culprit_subject": gitops.subject(result.culprit, deploy), "verdicts": verdicts, "intent": intent,
             "evaluations": state.evaluations,

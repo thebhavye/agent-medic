@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import neatlogs
 
-from medic import canary, coordinator, incidents, paths, remedy, triage, world
+from medic import anatomy, canary, coordinator, incidents, localize, paths, remedy, triage, world
 from medic.incidents import Incident
 from medic.investigators import dependency, loops, regression
 from medic.watcher import RECENT, Signal, Watcher, compare, save_state
@@ -111,6 +111,7 @@ class Medic:
             "loops": lambda: loops.investigate(evs, self.watcher.state.get("baseline") or {}),
             "regression": lambda: regression.investigate(paths.DEPLOY, inc.healthy_release, inc.release,
                                                          inc.signals[0]["name"], paths.CASES, self.reader, self.log),
+            "localize": lambda: self._localize(inc, evs),
         }
         chosen = [n for n in inc.triage["investigators"] if n in jobs]
         with ThreadPoolExecutor(max_workers=len(chosen)) as pool:
@@ -124,6 +125,21 @@ class Medic:
                 inc.note("investigated", f"{name}: {inc.findings[name]['verdict']}: {inc.findings[name]['detail']}",
                          self.log)
         inc.phase = "investigated"
+
+    def _localize(self, inc: Incident, evs: list) -> dict:
+        """Diff the failing window against healthy traces of the last good release, then map the
+        suspects onto the deployed code."""
+        healthy_release = inc.healthy_release[:12]
+        healthy = [e for e in self.watcher.all_evidence()
+                   if e.release == healthy_release and not e.failed and e.trace_id not in inc.trace_ids][-12:]
+        failing = [e for e in evs if e.failed or e.repeated_calls or e.tool_errors] or evs
+        result = localize.localize(failing, healthy)
+        files = [f for f in paths.AGENT_FILES if (paths.DEPLOY / f).exists()]
+        result["surfaces"] = anatomy.resolve(anatomy.scan(paths.DEPLOY, files), result.get("suspects", []))[:6]
+        for s in result["surfaces"][:2]:
+            if s["kind"] in ("tool_handler", "client") and s.get("symbol"):
+                s["impact"] = anatomy.graph_impact(paths.DEPLOY, s["symbol"], s["file"])
+        return {"investigator": "localize", **result}
 
     def do_decide(self, inc: Incident) -> None:
         inc.decision = coordinator.decide(inc.triage, inc.findings)

@@ -33,6 +33,8 @@ def triage(evs: list[TraceEvidence], signals: list[dict], release_changed: bool)
         investigators.append("loops")
     # Always ask whether the code changed; with no new release it answers "no" instantly.
     investigators.append("regression")
+    # Always localize: diff failing traces against healthy ones, step by step.
+    investigators.append("localize")
 
     examples = []
     for e in evs:

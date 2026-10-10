@@ -67,7 +67,7 @@ def test_watcher_signals_and_triage():
     assert {s.name for s in signals} >= {"tool_errors", "failures"}
     t = triage.triage(broken, [s.__dict__ for s in signals], release_changed=False)
     assert t["dominant"] == ["tool_error", "search_docs", "TypeError"]
-    assert t["investigators"] == ["dependency", "regression"]
+    assert t["investigators"] == ["dependency", "regression", "localize"]
 
 
 def test_loop_investigator_finds_repeats():

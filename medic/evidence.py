@@ -32,6 +32,9 @@ class TraceEvidence:
     tool_errors: list = field(default_factory=list)    # [{"tool", "type", "message", "input"}]
     tool_inputs: list = field(default_factory=list)    # [[tool, input]] for every call
     repeated_calls: int = 0                            # calls identical to an earlier call in the trace
+    # Every LLM and tool step in order: {"type", "name", "status", "model", "tokens",
+    # "arg_keys", "input", "output_len", "error_type", "error"}. Localization diffs these.
+    steps: list = field(default_factory=list)
 
     @property
     def non_answer(self) -> bool:
@@ -58,21 +61,33 @@ def collect(reader, trace: dict) -> TraceEvidence:
                        status=trace["status"], cost_usd=trace["totalCostUsd"], tokens=trace["totalTokens"],
                        tool_calls=trace["toolCallsCount"], duration_ms=trace["durationMs"])
     spans = sorted(reader.spans(trace["traceId"]), key=lambda s: s["startedAt"])
-    wanted = [s for s in spans if s["spanType"] in ("TOOL", "AGENT")]
+    # Tool spans: input, output and error. LLM spans: the error only, and only when they failed.
+    wanted = [s for s in spans if s["spanType"] in ("TOOL", "AGENT")
+              or (s["spanType"] == "LLM" and s["status"].upper() == "ERROR")]
+    fields = {"TOOL": "error,input,output", "AGENT": "input,output", "LLM": "error"}
     # Payloads are one request each; fetch them in parallel (span order is kept).
     with ThreadPoolExecutor(max_workers=4) as pool:
-        payloads = list(pool.map(
-            lambda s: reader.payload(trace["traceId"], s["spanId"],
-                                     fields="error,input" if s["spanType"] == "TOOL" else "input,output"), wanted))
-    for span, p in zip(wanted, payloads):
+        fetched = dict(zip((s["spanId"] for s in wanted), pool.map(
+            lambda s: reader.payload(trace["traceId"], s["spanId"], fields=fields[s["spanType"]]), wanted)))
+    for span in spans:
+        p = fetched.get(span["spanId"], {})
+        failed = span["status"].upper() == "ERROR"
+        err = (_json(p.get("error")) or {}) if failed else {}
         if span["spanType"] == "TOOL":
-            ev.tool_inputs.append([span["spanName"], p.get("input") or ""])
-            if span["status"].upper() == "ERROR":
-                err = _json(p.get("error")) or {}
+            raw_input = p.get("input") or ""
+            ev.tool_inputs.append([span["spanName"], raw_input])
+            if failed:
                 ev.tool_errors.append({"tool": span["spanName"], "type": err.get("type", "Error"),
-                                       "message": err.get("message", p.get("error") or ""),
-                                       "input": p.get("input") or ""})
-        else:
+                                       "message": err.get("message", p.get("error") or ""), "input": raw_input})
+            ev.steps.append({"type": "TOOL", "name": span["spanName"], "status": span["status"],
+                             "arg_keys": sorted(((_json(raw_input) or {}).get("args") or {}).keys()),
+                             "input": raw_input[:300], "output_len": len(p.get("output") or ""),
+                             "error_type": err.get("type", ""), "error": str(err.get("message", ""))[:300]})
+        elif span["spanType"] == "LLM":
+            ev.steps.append({"type": "LLM", "name": span["spanName"], "status": span["status"],
+                             "model": span.get("model") or "", "tokens": span.get("totalTokens") or 0,
+                             "error_type": err.get("type", ""), "error": str(err.get("message", ""))[:300]})
+        elif span["spanType"] == "AGENT":
             ev.question = (_json(p.get("input")) or {}).get("question", "")
             ev.answer = (_json(p.get("output")) or {}).get("answer", "")
     counts = Counter(tuple(c) for c in ev.tool_inputs)

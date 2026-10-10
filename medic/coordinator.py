@@ -25,7 +25,8 @@ def decide(triage: dict, findings: dict) -> dict:
     dv, rv, lv = dep.get("verdict"), reg.get("verdict"), loops.get("verdict")
     rationale, disagreements = [], []
 
-    for name, f in (("dependency", dep), ("regression", reg), ("loops", loops)):
+    loc = findings.get("localize", {})
+    for name, f in (("dependency", dep), ("regression", reg), ("loops", loops), ("localize", loc)):
         if f:
             rationale.append(f"{name}: {f.get('verdict')}: {f.get('detail')}")
 
@@ -38,6 +39,20 @@ def decide(triage: dict, findings: dict) -> dict:
         if lv in ("redundant_calls", "more_calls"):
             rationale.append("loop evidence is consistent with the culprit release")
         confidence = reg.get("confidence", 0.8)
+        # Two independent lines of evidence: what the culprit changed, and where traces diverge.
+        changed = {(c["kind"], c["name"]) for c in reg.get("changed_surfaces", [])}
+        located = {(c["kind"], c["name"]) for c in loc.get("surfaces", [])}
+        both = changed & located
+        if both:
+            parts = ", ".join(f"{k} {n}" for k, n in sorted(both))
+            rationale.append(f"the culprit release changed {parts}, and the failing traces diverge at the same "
+                             "place: two independent lines of evidence agree")
+            confidence = min(0.97, confidence + 0.05)
+        elif changed and located:
+            disagreements.append(
+                "the culprit release changed " + ", ".join(f"{k} {n}" for k, n in sorted(changed)) +
+                " but the traces diverge at " + ", ".join(f"{k} {n}" for k, n in sorted(located)[:3]) +
+                "; the bisection is direct evidence, so the release is still blamed, and the fix should look at both")
     elif dv == "outage":
         cause, confidence = "dependency_outage", dep.get("confidence", 0.8)
     elif dv == "contract_changed":
