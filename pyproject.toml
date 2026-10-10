@@ -26,5 +26,8 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 include = ["medic*", "bisect_agent*", "target_agent*"]
 
+[tool.setuptools.package-data]
+medic = ["dashboard.html"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

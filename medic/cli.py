@@ -121,6 +121,14 @@ def cmd_bisect(args) -> int:
     return cli.main()
 
 
+def cmd_dashboard(args) -> int:
+    from pathlib import Path
+
+    from medic import dashboard, paths
+    dashboard.serve(args.port, Path(args.medic_dir) if args.medic_dir else paths.MEDIC_DIR, args.host)
+    return 0
+
+
 def main() -> int:
     load_dotenv()
     for stream in (sys.stdout, sys.stderr):   # model text can contain any Unicode
@@ -159,6 +167,12 @@ def main() -> int:
     a = sub.add_parser("approve")
     a.add_argument("id")
     a.set_defaults(func=cmd_approve)
+
+    d = sub.add_parser("dashboard", help="live dashboard: watch production break and Medic heal it")
+    d.add_argument("--port", type=int, default=8790)
+    d.add_argument("--host", default="127.0.0.1", help="0.0.0.0 to serve other machines (e.g. on EC2)")
+    d.add_argument("--medic-dir", default=None, help="a benchmark run under .medic/bench to replay it")
+    d.set_defaults(func=cmd_dashboard)
 
     b = sub.add_parser("bisect", help="agent-bisect: the regression investigator on its own")
     b.add_argument("rest", nargs=argparse.REMAINDER)
