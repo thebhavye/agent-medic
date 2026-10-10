@@ -1,0 +1,15 @@
+[Unit]
+Description=Agent Medic knowledge-base API
+After=network.target medic-world-init.service
+Wants=medic-world-init.service
+
+[Service]
+Restart=always
+RestartSec=5
+User=medic
+WorkingDirectory=/opt/agent-medic
+EnvironmentFile=/opt/agent-medic/.env
+ExecStart=/opt/agent-medic/.venv/bin/python -m medic.cli kb --port 8781
+
+[Install]
+WantedBy=multi-user.target
