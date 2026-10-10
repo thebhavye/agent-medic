@@ -289,8 +289,11 @@ def unattributed_shared_evals(medic_dir: Path, incidents: list[dict]) -> list[Pa
             if p.name not in claimed]
 
 
-def per_case_tokens(medic_dir: Path, incidents: list[dict]) -> tuple[float, float]:
-    """Mean (input, output) tokens per eval case across attributed eval files only."""
+def per_case_tokens(medic_dir: Path, incidents: list[dict]) -> tuple[float | None, float | None]:
+    """Mean (input, output) tokens per eval case across attributed eval files only.
+
+    (None, None) when no attributed file holds a case: unknown, never a zero
+    average. A zero here would make monitoring look free downstream."""
     files: list[Path] = []
     for row in incidents:
         if row["source"] in ("live", "bench"):
@@ -298,20 +301,27 @@ def per_case_tokens(medic_dir: Path, incidents: list[dict]) -> tuple[float, floa
             files.extend(claimed)
     runs, cases, total_in, total_out = sum_eval_tokens(files)
     if not cases:
-        return 0.0, 0.0
+        return None, None
     return total_in / cases, total_out / cases
 
 
-def monthly_canary_cost(case_in: float, case_out: float, eval_price: dict,
-                        interval_minutes: float) -> tuple[float, float, float]:
-    """(runs/month, input tokens, cost) for an 8-case canary at a fixed interval."""
+def monthly_canary_cost(case_in, case_out, eval_price: dict,
+                        interval_minutes: float) -> tuple[float, float | None, float | None]:
+    """(runs/month, input tokens, cost) for an 8-case canary at a fixed interval.
+    Unknown per-case tokens propagate as Unknown cost, not $0."""
     runs = 30 * 24 * 60 / interval_minutes
+    if case_in is None or case_out is None:
+        return runs, None, None
     monthly_in, monthly_out = runs * 8 * case_in, runs * 8 * case_out
     return runs, monthly_in, token_cost_usd(monthly_in, monthly_out, eval_price)
 
 
 def fmt_usd(value: float) -> str:
     return f"${value:,.4f}" if value < 1 else f"${value:,.2f}"
+
+
+def fmt_usd_or_unknown(value) -> str:
+    return fmt_usd(value) if value is not None else "Unknown"
 
 
 def write_csv(rows: list[dict], path: Path):
@@ -389,14 +399,14 @@ def render_report(medic_dir: Path, rows: list[dict], incidents: list[dict],
         lines.append(f"| {label} | {fmt_usd(cost)} |")
     lines += ["", "## 3. Monitoring overhead per watched agent per month", "",
               f"Canary every {interval_minutes:g} minutes, 8 cases per run. Measured mean per "
-              f"eval case: {case_in:,.0f} input + {case_out:,.0f} output tokens.", "",
+              f"eval case: {f'{case_in:,.0f} input + {case_out:,.0f} output tokens' if case_in is not None else 'Unknown (no attributed eval cases)'}.", "",
               "| price point | canary runs/mo | canary cost/mo |",
               "|---|---|---|"]
     canary_costs = {}
     for key, (label, _fixer_key, eval_key) in POINTS.items():
         runs, _in, cost = monthly_canary_cost(case_in, case_out, PRICES[eval_key], interval_minutes)
         canary_costs[key] = cost
-        lines.append(f"| {label} | {runs:,.0f} | {fmt_usd(cost)} |")
+        lines.append(f"| {label} | {runs:,.0f} | {fmt_usd_or_unknown(cost)} |")
     lines += ["",
               "neatlogs reads for monitoring are not in the token math above; the watcher polls "
               "the trace list continuously (assumption: negligible API cost next to model tokens).",

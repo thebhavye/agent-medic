@@ -9,6 +9,7 @@ from scripts.unit_economics import (
     collect_incidents,
     eval_files_for,
     fmt_seconds,
+    fmt_usd_or_unknown,
     load_evidence_cache,
     load_traces,
     main,
@@ -16,9 +17,11 @@ from scripts.unit_economics import (
     median,
     median_incident_cost,
     median_or_none,
+    monthly_canary_cost,
     neatlogs_calls,
     p90,
     p90_or_none,
+    per_case_tokens,
     render_report,
     sum_eval_tokens,
     sum_fixer_usage,
@@ -201,3 +204,21 @@ def test_report_renders_unknown_timings(tmp_path):
     text, _summary = render_report(tmp_path, rows, [], 10)
     assert "Unknown" in text
     assert "resolve from incident open: median 300s" in text
+
+
+def test_monitoring_unknown_without_attributed_cases(tmp_path):
+    medic = tmp_path / "medic"
+    (medic / "incidents").mkdir(parents=True)
+    (medic / "deploy" / ".bisect" / "results").mkdir(parents=True)
+    incident(medic / "incidents" / "a.json", "a", trace_ids=[])
+    incidents = collect_incidents(medic)
+    assert per_case_tokens(medic, incidents) == (None, None)
+    runs, monthly_in, cost = monthly_canary_cost(
+        None, None, {"in_per_m": 0.1, "out_per_m": 0.5}, 10)
+    assert (monthly_in, cost) == (None, None)
+    assert fmt_usd_or_unknown(None) == "Unknown"
+    rows = [measure_row(medic, incidents[0], {}, {})]
+    text, summary = render_report(medic, rows, incidents, 10)
+    assert "Unknown (no attributed eval cases)" in text
+    assert "| As run | 4,320 | Unknown |" in text
+    assert summary["canary_as_run"] is None
