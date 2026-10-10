@@ -45,6 +45,30 @@ def test_failures_before_the_replaced_part_still_release_the_standby(armed):  # 
     assert state["b" * 12]["status"] == "not_code"                      # released, not left on
 
 
+def test_model_and_backend_outages_never_remove_working_aid(armed):  # noqa: F811
+    publish, tmp = armed
+    publish()
+    for i in range(core.TRIP_FAILURES):
+        run_request({"query": f"x{i}"})                                 # engages the healthy lookup()
+
+    def model_timeout(model):
+        raise TimeoutError("model request timed out")
+    for _ in range(core.TRIP_WINDOW):
+        try:
+            with medic.request():
+                medic.call_model(model_timeout, "model-a")              # the model is down, not the code
+        except TimeoutError:
+            pass
+        with medic.request():
+            try:
+                medic.guard_tool("kb", {}, lambda: (_ for _ in ()).throw(ConnectionError("kb down")))
+            except (ConnectionError, medic.FirstAidError):            # the breaker opens after 3
+                pass
+    state = json.loads((tmp / "state.json").read_text())
+    assert state["b" * 12]["status"] == "engaged"                       # the working aid stays on
+    assert run_request({"query": "after the outage"}) == "after the outage"
+
+
 def test_targeted_bundle_replaces_the_automatic_engagement(armed, monkeypatch):  # noqa: F811
     publish, tmp = armed
     publish(functions={"lookup": {"source": "def lookup(args):\n    return args['query']\n"}},
