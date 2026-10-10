@@ -204,8 +204,10 @@ def build_state(medic_dir: Path) -> dict:
     state = _read_json(medic_dir / "state.json") or {}
     commits = releases(deploy)
     head = _git(deploy, "rev-parse", "HEAD").strip()
-    traces = sorted((slim_trace(t) for t in state.get("traces") or [] if isinstance(t, dict)),
-                    key=lambda t: t["at"] or 0)[-TRACE_LIMIT:]
+    # Health numbers use exactly the traces Medic decides on: the watcher's stored order, last
+    # RECENT. The chart gets its own sample, sorted by start time and capped.
+    stored = [slim_trace(t) for t in state.get("traces") or [] if isinstance(t, dict)]
+    traces = sorted(stored, key=lambda t: t["at"] or 0)[-TRACE_LIMIT:]
 
     incidents = [incident_view(i) for i in
                  (_read_json(p) for p in sorted((medic_dir / "incidents").glob("*.json"))) if isinstance(i, dict)]
@@ -232,8 +234,9 @@ def build_state(medic_dir: Path) -> dict:
 
     rollout = _read_json(medic_dir / "rollout.json")
     if isinstance(rollout, dict):
-        mine = [t for t in traces if t["release"] == str(rollout.get("candidate", ""))[:12]]
-        rollout = {**rollout, "canary_traces": len(mine), "canary_window": window(mine)}
+        # Same sample rollout.judge() uses: the last RECENT traces on the candidate release.
+        mine = [t for t in stored if t["release"] == str(rollout.get("candidate", ""))[:12]]
+        rollout = {**rollout, "canary_traces": len(mine), "canary_window": window(mine[-RECENT:])}
 
     bench = []
     for p in sorted((medic_dir / "bench").glob("*/result.json")):
@@ -271,7 +274,7 @@ def build_state(medic_dir: Path) -> dict:
         "deploy": {"sha": head, "subject": (commits.get(head) or {}).get("subject", ""),
                    "at": (commits.get(head) or {}).get("at")} if head else None,
         "releases": release_info, "rollout": rollout,
-        "production": {"traces": traces, "baseline": state.get("baseline"), "current": window(traces[-RECENT:]),
+        "production": {"traces": traces, "baseline": state.get("baseline"), "current": window(stored[-RECENT:]),
                        "total": len(state.get("traces") or []), "canary_runs": canary_runs,
                        "canary_baseline": state.get("canary_baseline"), "healthy_release": state.get("healthy_release")},
         "incidents": incidents, "bench": bench, "external": external,
