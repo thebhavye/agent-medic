@@ -170,30 +170,52 @@ class Medic:
         if not self.auto_deploy:
             if not inc.deploy.get("approved"):
                 return       # waiting for `agent-medic approve <id>`
-        if ROLLOUT == "canary" and not rollout.current():
-            state = rollout.start(inc.id, inc.remedy["branch"])
-            inc.deploy = {**inc.deploy, "canary": state, "at": time.time()}
-            inc.note("canary", f"candidate {state['candidate'][:8]} serves {state['share']:.0%} of production; "
-                               f"{rollout.MIN_TRACES} canary traces decide promote or roll back", self.log)
+        if ROLLOUT == "direct":
+            self._promote(inc)
+            return
+        active = rollout.current()
+        if active and active.get("incident") == inc.id:
+            # This incident's canary already started (e.g. Medic crashed before saving the phase):
+            # resume judging it rather than treating it as permission to promote.
+            inc.deploy = {**inc.deploy, "canary": active, "at": inc.deploy.get("at") or active["started"]}
+            inc.note("canary", f"resuming the canary of candidate {active['candidate'][:8]}", self.log)
             inc.phase = "canary"
             return
-        self._promote(inc)
+        if active:
+            return                    # another incident's canary is running; one rollout at a time
+        state = rollout.start(inc.id, inc.remedy["branch"])
+        inc.deploy = {**inc.deploy, "canary": state, "at": time.time()}
+        inc.note("canary", f"candidate {state['candidate'][:8]} serves {state['share']:.0%} of production; "
+                           f"{rollout.MIN_TRACES} canary traces decide promote or roll back", self.log)
+        inc.phase = "canary"
 
     def do_canary(self, inc: Incident) -> None:
+        active = rollout.current()
+        if not active or active.get("incident") != inc.id:
+            # The rollout state is gone or isn't ours: don't promote without a canary.
+            inc.note("canary", "no canary rollout for this incident is active; starting one", self.log)
+            inc.phase = "remedied"
+            return
         verdict = rollout.judge(self.watcher, compare)
         if verdict is None:
             return                    # waiting for canary traffic
         inc.deploy["canary_verdict"] = {k: v for k, v in verdict.items() if k != "state"}
-        if verdict["verdict"] == "regressed":
+        if verdict["verdict"] == "healthy":
+            inc.note("canary", f"canary healthy: {verdict['detail']}; promoting", self.log)
             rollout.finish()
-            last = inc.remedy["attempts"][-1]
+            self._promote(inc)
+            return
+        rollout.finish()
+        last = inc.remedy["attempts"][-1]
+        if verdict["verdict"] == "regressed":
             last.update(accepted=False, feedback=f"rolled back: in production the canary regressed: {verdict['detail']}")
             inc.note("canary", f"rolled back automatically: {verdict['detail']}", self.log)
             inc.phase = "escalated" if len(inc.remedy["attempts"]) >= remedy.MAX_ATTEMPTS else "decided"
             return
-        inc.note("canary", f"canary {verdict['verdict']}: {verdict['detail']}; promoting", self.log)
-        rollout.finish()
-        self._promote(inc)
+        # Inconclusive: production never judged the fix. Never ship it on silence.
+        last.update(feedback=f"rolled back: the canary was inconclusive ({verdict['detail']})")
+        inc.note("escalated", f"canary inconclusive ({verdict['detail']}); rolled back, a human decides", self.log)
+        inc.phase = "escalated"
 
     def _promote(self, inc: Incident) -> None:
         inc.deploy = {**inc.deploy, **remedy.deploy(inc), "at": time.time()}
