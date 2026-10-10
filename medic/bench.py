@@ -168,6 +168,7 @@ def run(scenario: str, runs: int) -> None:
         workdir = BENCH / f"{scenario}-{time.strftime('%m%d-%H%M%S')}"
         workdir.mkdir(parents=True, exist_ok=True)
         env = {**os.environ, "MEDIC_DIR": str(workdir), "PYTHONIOENCODING": "utf-8",
+               "MEDIC_NEATLOGS_STATE": os.environ.get("MEDIC_NEATLOGS_STATE", str(ROOT / ".medic" / "neatlogs.json")),
                "MEDIC_CANARY_INTERVAL_S": os.environ.get("MEDIC_CANARY_INTERVAL_S", "60")}
         print(f"[bench] {scenario} run {i + 1}/{runs} in {workdir.name}", flush=True)
         proc = subprocess.run([sys.executable, "-m", "medic.bench", "_drive", "--scenario", scenario,

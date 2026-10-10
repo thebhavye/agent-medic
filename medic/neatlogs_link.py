@@ -19,6 +19,7 @@ import json
 import os
 import secrets
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -59,7 +60,9 @@ WEBHOOK_EVENTS = ["alert.threshold_breach", "alert.metric_threshold_breach", "al
 
 
 def _state_file() -> Path:
-    return paths.MEDIC_DIR / "neatlogs.json"
+    # The neatlogs setup belongs to the project, not to one Medic run: a benchmark run (its own
+    # MEDIC_DIR) points here at the project's setup.
+    return Path(os.environ.get("MEDIC_NEATLOGS_STATE") or paths.MEDIC_DIR / "neatlogs.json")
 
 
 def load() -> dict:
@@ -80,9 +83,12 @@ class Api(NeatlogsReader):
     def call(self, method: str, path: str, body: dict | None = None, **params) -> dict:
         if getattr(self, "_client", None) is None:
             self._client = httpx.Client(base_url=BASE_URL, headers=self._headers(), timeout=30)
+        # Writes carry an idempotency key, the same one on every retry, so a retried create
+        # can never create a second detection, rule or note.
+        headers = {"Idempotency-Key": str(uuid.uuid4())} if method != "GET" else {}   # canonical UUIDv4
         for attempt in range(5):
             self._wait_for_budget()
-            resp = self._client.request(method, path, json=body, params=params or None)
+            resp = self._client.request(method, path, json=body, params=params or None, headers=headers)
             self._note_budget(resp)
             if resp.status_code == 429:
                 continue
@@ -119,7 +125,8 @@ def _alert_rules(detections: dict, baseline: dict | None, webhook_id: str | None
                       "cooldownMinutes": 10, "severity": "critical" if key == "tool_failed" else "warning",
                       "channelMask": channels}
     rules["tool_failure_rate"] = {"name": PREFIX + "tool failure rate above 25%", "ruleType": "metric_threshold",
-                                  "metricName": "tool_failure_rate", "metricOperator": ">", "metricThresholdValue": 0.25,
+                                  "metricName": "tool_failure_rate", "metricAggregation": "avg",
+                                  "metricOperator": ">", "metricThresholdValue": 0.25,
                                   "windowMinutes": 10, "cooldownMinutes": 10, "severity": "critical",
                                   "channelMask": channels}
     tokens = (baseline or {}).get("tokens_per_run")
@@ -137,7 +144,7 @@ def setup(api: Api, baseline: dict | None = None, webhook_url: str | None = None
     state["group"] = _group(api)
     existing = {d.get("displayName"): d["id"] for d in api.call("GET", "/detections", limit=100).get("detections", [])}
     state.setdefault("detections", {})
-    state.setdefault("skipped", {})
+    state["skipped"] = {}                       # this run's word on what couldn't be created
     for key, spec in DETECTIONS.items():
         if spec["displayName"] in existing:
             state["detections"][key] = existing[spec["displayName"]]
