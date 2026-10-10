@@ -27,7 +27,7 @@ def triage(evs: list[TraceEvidence], signals: list[dict], release_changed: bool)
     names = {s["name"] for s in signals}
 
     investigators = []
-    if dominant[0] in ("tool_error", "non_answer"):
+    if dominant[0] in ("tool_error", "non_answer") or "quality" in names:
         investigators.append("dependency")
     if names & {"loops", "tool_calls", "cost"} or dominant[0] == "repeated_calls":
         investigators.append("loops")

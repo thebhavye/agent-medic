@@ -12,6 +12,7 @@ REMEDY = {
     "dependency_contract": "adapt_client",
     "dependency_rate_limit": "retry_policy",
     "dependency_outage": "escalate",
+    "dependency_data": "escalate",
     "agent_behavior": "escalate",
     "unexplained": "escalate",
 }
@@ -43,6 +44,10 @@ def decide(triage: dict, findings: dict) -> dict:
         cause, confidence = "dependency_contract", dep.get("confidence", 0.8)
         if rv in ("good_release_fails_today", "no_code_change"):
             rationale.append("the code did not change (or the old code fails too), which confirms the API change")
+    elif dv == "content_changed":
+        cause, confidence = "dependency_data", dep.get("confidence", 0.7)
+        rationale.append("the provider serves different data through an unchanged API; no code change can make "
+                         "the data correct, so the data owner has to be told")
     elif dv == "rate_limited":
         cause, confidence = "dependency_rate_limit", dep.get("confidence", 0.7)
     elif lv in ("redundant_calls", "more_calls"):

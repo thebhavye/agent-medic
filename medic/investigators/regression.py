@@ -14,7 +14,7 @@ from bisect_agent.search import bisect
 from bisect_agent.state import RunState, save
 
 # Watcher signal -> agent-bisect signature to bisect on.
-SIGNATURE_FOR = {"tool_errors": "errors", "failures": "quality", "loops": "tool_calls",
+SIGNATURE_FOR = {"tool_errors": "errors", "failures": "quality", "quality": "quality", "loops": "tool_calls",
                  "tool_calls": "tool_calls", "cost": "cost"}
 HEALTHY = {"pass_rate": 0.75, "error_rate": 0.25}
 

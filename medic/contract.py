@@ -4,6 +4,8 @@ A shape is the JSON structure without the values: types and key names. Comparing
 shape with the one recorded while traffic was healthy shows exactly how a dependency changed.
 """
 
+import hashlib
+
 import httpx
 
 
@@ -19,7 +21,7 @@ def shape(value, depth: int = 0):
 
 def probe(base_url: str, query: str, attempts: int = 6) -> dict:
     """Hit the search and docs endpoints a few times; record statuses, headers and shapes."""
-    statuses, search_shape, doc_shape, version, doc_id = [], None, None, None, None
+    statuses, search_shape, doc_shape, version, doc_id, doc_hash = [], None, None, None, None, None
     with httpx.Client(base_url=base_url, timeout=10) as client:
         for _ in range(attempts):
             try:
@@ -40,8 +42,15 @@ def probe(base_url: str, query: str, attempts: int = 6) -> dict:
             statuses.append(r.status_code)
             if r.status_code == 200:
                 doc_shape = shape(r.json())
+                doc_hash = fingerprint(r.json())
     return {"statuses": statuses, "api_version": version, "search": search_shape, "doc": doc_shape,
-            "sample_query": query}
+            "sample_query": query, "doc_id": doc_id, "doc_hash": doc_hash}
+
+
+def fingerprint(doc: dict) -> str:
+    """Hash of a document's text, so "same shape, different data" can be noticed too."""
+    text = max((v for v in doc.values() if isinstance(v, str)), key=len, default="")
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()[:16]
 
 
 def snapshot(base_url: str, questions: list[str]) -> dict:

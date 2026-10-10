@@ -45,6 +45,8 @@ TARGETS = {
 }
 
 AUDIT_RUNS = 2            # runs of the target before judging it
+QUOTA = re.compile(r"RESOURCE_EXHAUSTED|exceeded your current quota|quota", re.I)
+TRANSIENT = re.compile(r"\b(429|500|503)\b|UNAVAILABLE|high demand|overloaded|try again later|timed out|timeout", re.I)
 FAILING = 0.5             # share of failing runs that opens an incident
 RUN_TIMEOUT_S = 600
 
@@ -148,7 +150,8 @@ def investigate_provider(spec: dict, errors: list[dict]) -> dict:
     if re.search(r"no longer available|not found|deprecated|retired|decommission", msg, re.I) and code in ("404", "410", None):
         probes = {m: _probe_gemini(m) for m in filter(None, [model, replacement])}
         finding["probes"] = probes
-        ok = replacement and probes.get(replacement) == 200
+        # 429 means the model exists and is only rate limited for this key.
+        ok = replacement and probes.get(replacement) in (200, 429)
         return {**finding, "verdict": "model_retired", "confidence": 0.95 if ok else 0.7,
                 "detail": f"the provider no longer serves {model} (HTTP {code}); "
                           + (f"its suggested replacement {replacement} answers (HTTP 200)" if ok
@@ -161,13 +164,19 @@ def investigate_provider(spec: dict, errors: list[dict]) -> dict:
 
 
 def _probe_gemini(model: str) -> int:
-    try:
-        r = httpx.post(f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-                       headers={"x-goog-api-key": os.environ.get("GOOGLE_API_KEY", "")},
-                       json={"contents": [{"parts": [{"text": "Reply with OK."}]}]}, timeout=60)
-        return r.status_code
-    except httpx.HTTPError:
-        return 0
+    status = 0
+    for attempt in range(3):     # a busy model (429/503) gets a few tries before we judge it
+        try:
+            r = httpx.post(f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                           headers={"x-goog-api-key": os.environ.get("GOOGLE_API_KEY", "")},
+                           json={"contents": [{"parts": [{"text": "Reply with OK."}]}]}, timeout=60)
+            status = r.status_code
+        except httpx.HTTPError:
+            status = 0
+        if status not in (0, 429, 500, 503):
+            return status
+        time.sleep(10 * (attempt + 1))
+    return status
 
 
 def investigate_dependencies(spec: dict, runs: list[dict]) -> dict:
@@ -228,9 +237,31 @@ def fix_prompt(spec: dict, case: Case, previous: list[dict]) -> str:
         + "\n</runtime_warnings>",
         f"<current_files>\n{files}\n</current_files>",
     ]
+    remedy = case.decision.get("remedy", {})
+    if remedy.get("kind") == "update_model" and remedy.get("to"):
+        sections.insert(1, f"<verified_replacement>\nUse exactly the model `{remedy['to']}`. Medic called it with this "
+                           f"API key and it answered. Do not choose any other model name.\n</verified_replacement>")
+    follow_ups = [f for a in previous for f in a.get("follow_ups", [])]
+    if follow_ups:
+        sections.append("<other_failures_seen_during_verification>\n" + "\n".join(follow_ups[:4]) +
+                        "\nThese are separate from the diagnosed fault. Fix them only if the fix is small and safe "
+                        "(for example, handling a tool error instead of crashing).\n</other_failures_seen_during_verification>")
     for i, a in enumerate(previous, 1):
         sections.append(f"<previous_attempt n=\"{i}\">\nedits: {json.dumps(a.get('edits'))}\nresult: {a.get('feedback')}\n</previous_attempt>")
     return "\n\n".join(sections)
+
+
+def fault_class(err: dict) -> tuple:
+    """Coarse identity of a failure: which kind of span failed, with which HTTP status."""
+    status = (re.search(r"\b([45]\d\d)\b", err.get("message", "")) or [None, None])[1]
+    return (err.get("type"), status)
+
+
+def describe_failure(run: dict) -> str:
+    if run["errors"]:
+        e = run["errors"][0]
+        return f"exit {run['exit']}, trace {run['trace_status']}: {e['type']} {e['span']}: {e['message'][:200]}"
+    return f"exit {run['exit']}, trace {run['trace_status']}: {run['stderr_tail'][-200:]}"
 
 
 def git(spec: dict, *args: str, check: bool = True) -> str:
@@ -269,25 +300,49 @@ def attempt_fix(spec: dict, case: Case, reader) -> dict:
     # Verify by running the real agent again, twice, and reading back its traces.
     results = []
     for topic in spec["topics"][:2]:
-        run = run_target(spec, topic)
-        trace = trace_for(reader, spec, run)
-        results.append({**run, "trace_status": trace["status"] if trace else None,
-                        "trace_id": trace["traceId"] if trace else None})
+        for retry in range(3):
+            run = run_target(spec, topic)
+            trace = trace_for(reader, spec, run)
+            errors = span_errors(reader, trace) if trace and trace["status"].upper() == "ERROR" else []
+            run.update(trace_status=trace["status"] if trace else None, trace_id=trace["traceId"] if trace else None,
+                       errors=errors[:2], retries=retry)
+            # A provider's temporary overload says nothing about the fix: wait and run again.
+            if not (errors and TRANSIENT.search(errors[0]["message"])):
+                break
+            time.sleep(20 * (retry + 1))
+        results.append(run)
     record["verification"] = results
-    ok = all(r["exit"] == 0 and (r["trace_status"] or "").upper() == "OK" for r in results)
+    # Judge the fix on the fault it was written for: that fault must be gone from every run and
+    # at least one run must succeed outright. A different failure (a flaky search tool, say) does
+    # not sink the fix; it is recorded as a follow-up finding of its own.
+    diagnosed = fault_class((case.triage.get("errors") or [{}])[0])
+    succeeded = [r for r in results if r["exit"] == 0 and (r["trace_status"] or "").upper() == "OK"]
+    still_broken = [r for r in results if r["errors"] and fault_class(r["errors"][0]) == diagnosed]
+    other = [r for r in results if r not in succeeded and r not in still_broken]
+    record["follow_ups"] = [describe_failure(r) for r in other]
     still_warn = [w for r in results for w in r["warnings"] if re.search(r"renamed|deprecated", w, re.I)]
-    if not ok:
+    # Out of quota: the fix can't be judged either way. Pause instead of spending an attempt.
+    if not still_broken and not succeeded and other and all(
+            r["errors"] and QUOTA.search(r["errors"][0]["message"]) for r in other):
         git(spec, "checkout", "-q", "--", ".")
-        record["feedback"] = "; ".join(f"run {i + 1}: exit {r['exit']}, trace {r['trace_status']}: {r['stderr_tail'][-200:]}"
-                                       for i, r in enumerate(results))
+        record.update(blocked=True, feedback="verification blocked: the provider quota is exhausted; "
+                                             "the diagnosed failure did not recur. Resume when quota resets.")
+        return record
+    if still_broken or not succeeded:
+        git(spec, "checkout", "-q", "--", ".")
+        record["feedback"] = "; ".join(f"run {i + 1}: {describe_failure(r)}" for i, r in enumerate(results)
+                                       if r not in succeeded)
         return record
     git(spec, "add", "-A", spec["subdir"])
     git(spec, "commit", "-q", "-m", f"{proposal.get('commit_title') or 'Fix example'}\n\n{proposal.get('diagnosis', '')}\n\n"
-                                    f"Verified by running the example twice: both runs exit 0 and their neatlogs traces are OK.\n"
+                                    f"Verified by running the example {len(results)} times: the diagnosed failure is gone "
+                                    f"and {len(succeeded)} run(s) exit 0 with OK neatlogs traces.\n"
                                     f"Agent-Medic-Case: {case.id}\n")
     record.update(accepted=True, commit=git(spec, "rev-parse", "HEAD"), branch=branch,
                   remaining_warnings=still_warn,
-                  feedback=f"verified: {len(results)}/{len(results)} real runs succeed with OK traces")
+                  feedback=f"verified: the diagnosed failure is gone in all {len(results)} real runs; "
+                           f"{len(succeeded)}/{len(results)} succeed with OK traces"
+                           + (f"; {len(other)} run(s) hit a different failure, recorded as a follow-up" if other else ""))
     return record
 
 
@@ -320,6 +375,17 @@ def report(spec: dict, case: Case) -> str:
         lines += ["", "### Verification", "", a.get("feedback", "")]
         lines += [f"- run `{r['topic']}`: exit {r['exit']}, {r['seconds']}s, trace `{r['trace_id']}` {r['trace_status']}"
                   for r in a.get("verification", [])]
+    follow_ups = [f for x in case.attempts for f in x.get("follow_ups", [])]
+    warnings = sorted({w for x in case.attempts for w in x.get("remaining_warnings", [])} |
+                      {w for r in case.runs for w in r.get("warnings", []) if re.search(r"renamed|deprecated", w, re.I)})
+    if follow_ups or warnings:
+        lines += ["", "### Other problems seen while verifying (not fixed here)", ""]
+        lines += [f"- {f}" for f in dict.fromkeys(follow_ups)] + [f"- runtime warning: `{w[-200:]}`" for w in warnings]
+    rejected = [x for x in case.attempts if not x.get("accepted")]
+    if rejected:
+        lines += ["", "### Rejected attempts", ""]
+        lines += [f"- attempt {x['n']} ({x.get('commit_title') or 'no proposal'}): {x.get('feedback', '')[:240]}"
+                  for x in rejected]
     return "\n".join(lines) + "\n"
 
 
@@ -365,10 +431,13 @@ def step(spec: dict, case: Case, reader) -> None:
     elif case.phase == "fix":
         rec = attempt_fix(spec, case, reader)
         case.attempts.append(rec)
-        case.note("fix", f"attempt {rec['n']}: {'accepted' if rec['accepted'] else 'rejected'}: {rec.get('feedback')}")
+        status = "accepted" if rec["accepted"] else "blocked" if rec.get("blocked") else "rejected"
+        case.note("fix", f"attempt {rec['n']}: {status}: {rec.get('feedback')}")
         if rec["accepted"]:
             case.phase = "propose"
-        elif rec["n"] >= 3:
+        elif rec.get("blocked"):
+            case.phase = "blocked"
+        elif sum(not a.get("blocked") for a in case.attempts) >= 3:
             case.phase = "escalated"
     elif case.phase == "propose":
         case.proposal = propose(spec, case)
@@ -403,8 +472,11 @@ def main() -> int:
     from bisect_agent.neatlogs_api import NeatlogsReader
     reader = NeatlogsReader()
     case = case or Case(target=args.target)
+    if case.phase == "blocked":
+        case.note("fix", "resuming after a blocked verification")
+        case.phase = "fix"
     try:
-        while case.phase not in ("done", "healthy", "escalated"):
+        while case.phase not in ("done", "healthy", "escalated", "blocked"):
             with neatlogs.trace(f"medic:external:{case.phase}", kind="AGENT", session_id=f"external-{case.id}"):
                 step(spec, case, reader)
             save(case)

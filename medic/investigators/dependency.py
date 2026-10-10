@@ -1,15 +1,17 @@
 """Dependency investigator: did the knowledge-base API change under us?
 
-It probes the live API and compares status codes and response shapes with the contract the
-Watcher recorded while traffic was healthy, then checks that against the errors the tool
-spans actually raised.
+It probes the live API and compares status codes, response shapes and document content with
+the contract the Watcher recorded while traffic was healthy, then checks that against the
+errors the tool spans actually raised.
 """
 
 from medic import contract
 
 
 def investigate(kb_url: str, baseline_contract: dict | None, examples: list[dict]) -> dict:
-    query = next((e["question"] for e in examples if e.get("question")), "pilot plant")
+    # Probe with the healthy snapshot's query, so the same document is compared.
+    query = (baseline_contract or {}).get("sample_query") or \
+        next((e["question"] for e in examples if e.get("question")), "pilot plant")
     live = contract.probe(kb_url, query)
     statuses = live["statuses"]
     errors = [err for e in examples for err in e.get("tool_errors", [])]
@@ -33,5 +35,11 @@ def investigate(kb_url: str, baseline_contract: dict | None, examples: list[dict
                       if version_changed else "") + "; ".join(changes)
             return {**finding, "verdict": "contract_changed", "confidence": 0.9 if errors else 0.6,
                     "changes": changes, "detail": detail}
+        same_doc = baseline_contract.get("doc_id") and baseline_contract.get("doc_id") == live.get("doc_id")
+        if same_doc and baseline_contract.get("doc_hash") and baseline_contract["doc_hash"] != live.get("doc_hash"):
+            wrong = [e for e in examples if e.get("expect")]
+            return {**finding, "verdict": "content_changed", "confidence": 0.85 if wrong else 0.6,
+                    "detail": f"same API and response shapes, but document {live['doc_id']!r} now has different "
+                              "content than during healthy traffic: the provider is serving different data"}
     return {**finding, "verdict": "healthy", "confidence": 0.7,
-            "detail": "the API answers normally with the same response shapes as during healthy traffic"}
+            "detail": "the API answers normally with the same response shapes and content as during healthy traffic"}

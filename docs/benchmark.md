@@ -9,11 +9,13 @@ Each run: fresh deployment, healthy traffic until Medic freezes a baseline, one 
 | healthy | scripted | ollama_cloud | no_incident ✅ | - | - | - | - | - | - | ✅ |
 | outage | scripted | ollama_cloud | escalated ✅ | dependency_outage ✅ | escalate ✅ | - | 1m 53s | 3m 07s | 0 | ✅ |
 | retry_loop | scripted | ollama_cloud | resolved ✅ | code_regression ✅ | code_fix ✅ | 0ec99a55 ✅ | 5m 44s | 11m 04s | 1 | ✅ |
+| stale_data | scripted | ollama_cloud | escalated ✅ | dependency_data ✅ | escalate ✅ | - | 2m 27s | 2m 45s | 0 | ✅ |
 
-**5/5 runs passed.**
+**6/6 runs passed.**
 
 - **api_change**: The knowledge-base provider ships API v2 under live traffic.
 - **bad_release**: A deploy bundles three commits; one renames a tool parameter in the schema only.
 - **retry_loop**: A deploy bundles three commits; one tells the agent to re-verify every fact.
 - **outage**: The knowledge-base API goes down. There is no code fix; Medic should page a human.
+- **stale_data**: The provider starts serving an outdated data snapshot through the same API. Nothing errors; only the canary eval sees the wrong answers. No code fix can correct data, so Medic escalates.
 - **healthy**: Nothing breaks. Medic should stay quiet (false-alarm check).

@@ -8,6 +8,8 @@ It lives outside the agent's code on purpose: Medic has to tell "our code broke"
                  docs -> {"doc_id", "title", "content"}
     rate_limit   about half of requests get 429 with Retry-After: 1
     outage       every request gets 503
+    stale_data   same API and shapes, but documents come from an outdated snapshot: the figures
+                 are wrong. Nothing errors; the agent answers confidently and incorrectly.
 
     python -m target_agent.kb_service --port 8781
 """
@@ -22,7 +24,24 @@ from urllib.parse import parse_qs, urlparse
 from target_agent.corpus import DOCS
 from target_agent.search import rank
 
-MODES = ("normal", "schema_v2", "rate_limit", "outage")
+MODES = ("normal", "schema_v2", "rate_limit", "outage", "stale_data")
+
+# The outdated snapshot served in stale_data mode: same documents, older figures.
+STALE = [("412 MWh", "318 MWh"), ("Narvik", "Bodo"), ("9,200 full cycles", "6,100 full cycles"),
+         ("$86 million", "$41 million"), ("Fjord Ventures", "Nordic Seed Partners"), ("11 weeks", "19 weeks"),
+         ("1.6 GWh", "0.7 GWh"), ("20 MW", "8 MW"), ("Nordhavn Energi", "Vestkyst Kraft"),
+         ("94 percent", "71 percent"), ("UL 9540A", "UL 1973"), ("Kestrel Materials", "Arden Chemicals"),
+         ("Bergen-2", "Tromso-1"), ("Ines Okafor", "Lars Vik"), ("March 2024", "March 2021")]
+
+
+def _body(doc: dict) -> str:
+    body = doc["body"]
+    if _state["mode"] == "stale_data":
+        for new, old in STALE:
+            body = body.replace(new, old)
+    return body
+
+
 _state = {"mode": "normal", "requests": 0}
 _lock = threading.Lock()
 
@@ -80,8 +99,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(404, {"error": f"unknown doc {doc_id!r}"})
             doc = DOCS[doc_id]
             if mode == "schema_v2":
-                return self._send(200, {"doc_id": doc_id, "title": doc["title"], "content": doc["body"]})
-            return self._send(200, {"id": doc_id, "title": doc["title"], "body": doc["body"]})
+                return self._send(200, {"doc_id": doc_id, "title": doc["title"], "content": _body(doc)})
+            return self._send(200, {"id": doc_id, "title": doc["title"], "body": _body(doc)})
 
         return self._send(404, {"error": "not found"})
 

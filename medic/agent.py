@@ -10,10 +10,10 @@ from concurrent.futures import ThreadPoolExecutor
 
 import neatlogs
 
-from medic import coordinator, incidents, paths, remedy, triage, world
+from medic import canary, coordinator, incidents, paths, remedy, triage, world
 from medic.incidents import Incident
 from medic.investigators import dependency, loops, regression
-from medic.watcher import RECENT, Watcher, compare
+from medic.watcher import RECENT, Signal, Watcher, compare, save_state
 from medic import evidence
 
 MONITOR_TIMEOUT_S = 1800
@@ -36,6 +36,13 @@ class Medic:
         if open_now:
             return
         signals, current = self.watcher.check()
+        # Wrong-but-confident answers leave no trace signal; the canary eval catches them.
+        if self.watcher.state.get("baseline") and canary.due(self.watcher.state):
+            canary.run(self.watcher.state, self.log)
+            save_state(self.watcher.state)
+            quality = canary.regressed(self.watcher.state)
+            if quality:
+                signals = [*signals, Signal(**quality)]
         if signals and not self._recently_escalated(signals):
             self.open(signals)
 
@@ -86,6 +93,12 @@ class Medic:
         by_id = {e.trace_id: e for e in self.watcher.all_evidence()}
         evs = [by_id[t] for t in inc.trace_ids if t in by_id]
         inc.triage = triage.triage(evs, inc.signals, release_changed=inc.release[:12] != inc.healthy_release[:12])
+        last = (self.watcher.state.get("canary") or [{}])[-1]
+        if any(s["name"] == "quality" for s in inc.signals) and last.get("failed"):
+            inc.triage["examples"] = [{"question": f["question"], "answer": f["answer"], "expect": f["expect"],
+                                       "tool_errors": []} for f in last["failed"][:4]]
+            inc.triage["summary"] = (f"canary: {len(last['failed'])}/{last['n']} known-answer questions now answered "
+                                     "wrong, while production traces show no errors")
         inc.note("triaged", f"{inc.triage['summary']}; sending {', '.join(inc.triage['investigators'])}", self.log)
         inc.phase = "triaged"
 

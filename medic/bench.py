@@ -37,6 +37,10 @@ SCENARIOS = {
     "outage": {"fault": ("chaos", "outage"), "cause": "dependency_outage", "remedy": "escalate",
                "outcome": "escalated",
                "story": "The knowledge-base API goes down. There is no code fix; Medic should page a human."},
+    "stale_data": {"fault": ("chaos", "stale_data"), "cause": "dependency_data", "remedy": "escalate",
+                   "outcome": "escalated",
+                   "story": "The provider starts serving an outdated data snapshot through the same API. Nothing errors; "
+                            "only the canary eval sees the wrong answers. No code fix can correct data, so Medic escalates."},
     "healthy": {"fault": None, "outcome": "no_incident",
                 "story": "Nothing breaks. Medic should stay quiet (false-alarm check)."},
 }
@@ -80,6 +84,11 @@ def drive(scenario: str, workdir: Path) -> dict:
     while medic.watcher.state.get("baseline") is None:
         if time.time() - started > BASELINE_TIMEOUT_S:
             return {**result, "error": "no baseline within the time limit"}
+        traffic.run_batch(3, 3)
+        tick()
+    while medic.watcher.state.get("canary_baseline") is None:     # the canary needs a healthy pass rate too
+        if time.time() - started > BASELINE_TIMEOUT_S:
+            return {**result, "error": "no canary baseline within the time limit"}
         traffic.run_batch(3, 3)
         tick()
     result["baseline"] = medic.watcher.state["baseline"]
@@ -152,7 +161,8 @@ def run(scenario: str, runs: int) -> None:
     for i in range(runs):
         workdir = BENCH / f"{scenario}-{time.strftime('%m%d-%H%M%S')}"
         workdir.mkdir(parents=True, exist_ok=True)
-        env = {**os.environ, "MEDIC_DIR": str(workdir), "PYTHONIOENCODING": "utf-8"}
+        env = {**os.environ, "MEDIC_DIR": str(workdir), "PYTHONIOENCODING": "utf-8",
+               "MEDIC_CANARY_INTERVAL_S": os.environ.get("MEDIC_CANARY_INTERVAL_S", "60")}
         print(f"[bench] {scenario} run {i + 1}/{runs} in {workdir.name}", flush=True)
         proc = subprocess.run([sys.executable, "-m", "medic.bench", "_drive", "--scenario", scenario,
                                "--out", str(workdir / "result.json")], env=env, cwd=ROOT)

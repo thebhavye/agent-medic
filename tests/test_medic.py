@@ -89,3 +89,21 @@ def test_coordinator_trusts_healthy_release_replay():
     d = coordinator.decide({}, {"dependency": {"verdict": "outage", "detail": "x"},
                                 "regression": {"verdict": "no_code_change", "detail": "y"}})
     assert d["remedy"] == "escalate"
+
+
+def test_external_fault_class_separates_model_404_from_tool_timeouts():
+    from medic.external import fault_class
+    model_404 = {"type": "LLM", "message": "404 NOT_FOUND. models/gemini-2.5-flash is no longer available"}
+    wrong_model = {"type": "LLM", "message": "404 NOT_FOUND. models/gemini-1.5-flash is not found"}
+    search_timeout = {"type": "TOOL", "message": "operation timed out"}
+    assert fault_class(model_404) == fault_class(wrong_model) == ("LLM", "404")
+    assert fault_class(search_timeout) != fault_class(model_404)
+
+
+def test_stale_data_is_a_content_change_and_escalates(kb_url, chaos):
+    baseline = contract.probe(kb_url, "Where is the Halcyon pilot plant located?")
+    chaos("stale_data")
+    finding = dependency.investigate(kb_url, baseline, [{"question": "x", "expect": [["Narvik"]], "tool_errors": []}])
+    assert finding["verdict"] == "content_changed"
+    d = coordinator.decide({}, {"dependency": finding, "regression": {"verdict": "no_code_change", "detail": "y"}})
+    assert d["cause"] == "dependency_data" and d["remedy"] == "escalate"
