@@ -38,3 +38,18 @@ def test_review_keeps_candidates_on_target(tmp_path):
 def test_target_section_names_the_part_and_operator():
     text = tournament.target_section(surface("prompt", "system", "target_agent/agent.py", 16, 21, "SYSTEM = (...)"))
     assert 'kind="prompt"' in text and "Edit the instruction text" in text and "SYSTEM = (...)" in text
+
+
+def test_review_rejects_routing_around_a_suspected_function(tmp_path):
+    (tmp_path / "target_agent").mkdir()
+    (tmp_path / "target_agent" / "tools.py").write_text(
+        'def read_doc(doc_id):\n    return _get(doc_id)["body"][:300]\n\n'
+        'TOOL_HANDLERS = {"read_doc": lambda args: read_doc(args["doc_id"])}\n')
+    target = surface("tool_handler", "read_doc", start=4, end=4)
+    bypass = [{"path": "target_agent/tools.py", "find": 'lambda args: read_doc(args["doc_id"])',
+               "replace": 'lambda args: _get(args["doc_id"])["body"]'}]
+    suspects = [surface("tool_handler", "read_doc", start=1, end=2)]
+    problems = tournament.review(bypass, tmp_path, target, suspects)
+    assert any("bypasses read_doc()" in p for p in problems)
+    real_fix = [{"path": "target_agent/tools.py", "find": '["body"][:300]', "replace": '["body"]'}]
+    assert tournament.review(real_fix, tmp_path, surface("tool_handler", "read_doc", start=1, end=2), suspects) == []

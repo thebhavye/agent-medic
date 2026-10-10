@@ -67,11 +67,15 @@ def target_section(t: dict) -> str:
             f"the diagnosis.\n\n{t['snippet']}{impact}\n</repair_target>")
 
 
-def review(edits: list[dict], root: Path, target: dict) -> list[str]:
-    """A good fix, not just a working one: stays on its target, proportionate, honest, sound."""
+def review(edits: list[dict], root: Path, target: dict, suspects: list[dict] | None = None) -> list[str]:
+    """A good fix, not just a working one: stays on its target, proportionate, honest, sound, and
+    repairs the suspected code instead of routing around it."""
     problems = []
     if not edits:
         return ["no edits proposed"]
+    for name in _bypassed(edits, root, suspects or []):
+        problems.append(f"bypasses {name}() instead of fixing it: the call is removed but {name} still exists, "
+                        "so anything else using it stays broken")
     off_target = [e["path"] for e in edits if e["path"].replace("\\", "/") != target["file"]]
     if off_target:
         problems.append(f"edits outside the target file {target['file']}: {sorted(set(off_target))}")
@@ -93,6 +97,20 @@ def review(edits: list[dict], root: Path, target: dict) -> list[str]:
     return problems
 
 
+def _bypassed(edits: list[dict], root: Path, suspects: list[dict]) -> list[str]:
+    """Suspected functions an edit stops calling while leaving them defined: a workaround."""
+    names = {s.get("symbol") for s in suspects if s.get("kind") in ("tool_handler", "client") and s.get("symbol")}
+    out = []
+    for name in sorted(n for n in names if n):
+        call = re.compile(rf"\b{re.escape(name)}\(")
+        removed = any(call.search(e["find"]) and not call.search(e["replace"]) for e in edits)
+        still_defined = any(re.search(rf"^\s*def {re.escape(name)}\(", (root / f).read_text(encoding="utf-8"), re.M)
+                            for f in {e["path"] for e in edits} if (root / f).exists())
+        if removed and still_defined:
+            out.append(name)
+    return out
+
+
 def _changed_lines(edits: list[dict]) -> int:
     return sum(max(len(e["find"].splitlines()), len(e["replace"].splitlines())) for e in edits)
 
@@ -104,6 +122,12 @@ def run(inc, base_prompt, verify, log=print) -> dict:
     previous = [c for a in inc.remedy.get("attempts", []) for c in a.get("tournament", [])]
     aims = targets(inc) or [None]
     n_attempt = len(inc.remedy.get("attempts", [])) + 1
+
+    # The parts the evidence implicates: what the culprit changed and where the traces diverge.
+    suspects = (inc.findings.get("regression", {}).get("changed_surfaces", [])
+                + inc.findings.get("localize", {}).get("surfaces", []))
+    culprit_parts = {(s["kind"], s["name"], s["file"], s["start"])
+                     for s in inc.findings.get("regression", {}).get("changed_surfaces", [])}
 
     # Worktrees one at a time (git locks its worktree list); fixing and verifying in parallel.
     roots = []
@@ -130,7 +154,7 @@ def run(inc, base_prompt, verify, log=print) -> dict:
             return {**record, "verdict": "no_proposal", "feedback": f"{type(exc).__name__}: {exc}"}
         record.update({k: proposal.get(k) for k in ("commit_title", "diagnosis", "original_intent",
                                                      "how_intent_is_kept", "edits", "usage")})
-        problems = review(proposal.get("edits") or [], root, target) if target else []
+        problems = review(proposal.get("edits") or [], root, target, suspects) if target else []
         if problems:
             return {**record, "verdict": "rejected_in_review", "feedback": "; ".join(problems)}
         try:
@@ -151,8 +175,16 @@ def run(inc, base_prompt, verify, log=print) -> dict:
             + (f": {c['feedback'][:140]}" if c["verdict"] != "passed" else ""))
 
     passed = [c for c in board if c["verdict"] == "passed"]
+    # Fixing what the culprit broke beats working around it; diff size only breaks ties after that.
+    def at_root_cause(c: dict) -> bool:
+        t = c.get("target") or {}
+        return (t.get("kind"), t.get("name"), t.get("file"), t.get("start")) in culprit_parts
+
     winner = min(passed, key=lambda c: (-c["metrics"]["pass_rate"], c["metrics"]["error_rate"],
-                                        c["metrics"]["tool_calls_per_run"], c["changed_lines"])) if passed else None
+                                        not at_root_cause(c), c["metrics"]["tool_calls_per_run"],
+                                        c["changed_lines"])) if passed else None
+    for c in board:
+        c["at_root_cause"] = at_root_cause(c)
     for c in board:
         c["winner"] = c is winner
         if c is not winner:
