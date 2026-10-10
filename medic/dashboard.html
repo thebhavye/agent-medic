@@ -626,6 +626,14 @@ function repairStage(inc){
         : "No candidate has been verified yet.", body);
 }
 
+// Is a promoted release still the one serving? Only say "replaced" when a different
+// deployed release is known; without deployment data the current state is unknown.
+function liveStatus(release){
+  var live = DATA.deploy && DATA.deploy.sha, mine = String(release || "").slice(0, 12);
+  if (!live || !mine) return "current live release unknown";
+  return live.indexOf(mine) === 0 ? "it is the live release" : "since replaced by " + short(live);
+}
+
 function canaryStage(inc){
   var c = inc.canary || {}, ro = c.rollout || (DATA.rollout && DATA.rollout.incident === inc.id ? DATA.rollout : null);
   var v = c.verdict, st = stateOf(inc, "canary", "deployed");
@@ -653,10 +661,8 @@ function canaryStage(inc){
   if (v && v.answers) body.push(h("div", {class:"sig", style:"margin-top:8px"}, h("span", {class:"muted"}, "Known-answer eval on the canary release:"), h("b", null, v.answers)));
   var rolled = (inc.timeline || []).filter(function(e){ return /\brolled back\b|\brolling back\b/i.test(e.msg); });
   rolled.forEach(function(e){ body.push(h("div", {class:"outcome bad"}, h("span", {class:"ic"}, "↺"), h("span", null, e.msg))); });
-  // Only claim "live" while this fix is still the deployed release; later releases replace it.
-  var stillLive = c.release && DATA.deploy && DATA.deploy.sha && DATA.deploy.sha.indexOf(String(c.release).slice(0, 12)) === 0;
   if (c.deployed && !live) body.push(h("div", {class:"outcome ok"}, h("span", {class:"ic"}, "✓"),
-    h("span", null, "Promoted ", sha(c.release), stillLive ? " · it is the live release" : " at " + day(c.at) + " · since replaced by a newer release",
+    h("span", null, "Promoted ", sha(c.release), " at " + day(c.at) + " · " + liveStatus(c.release),
       v && v.detail ? h("span", {class:"muted", style:"font-weight:400"}, " · " + v.detail) : null)));
   else if (live) body.push(h("div", {class:"outcome warn"}, h("span", {class:"ic"}, "…"), h("span", null, "Collecting canary traces: " + live.canary_traces + " so far")));
   return stage(4, st, "Canary", took(inc, "canary", "deployed"),

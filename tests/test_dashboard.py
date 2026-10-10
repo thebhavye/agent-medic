@@ -115,22 +115,35 @@ def test_health_numbers_use_the_traces_medic_decides_on(tmp_path):
     assert state["production"]["traces"][0]["id"] == "late"          # the chart still sorts by start time
 
 
-def run_js(expr):
-    """Evaluate one expression against the page's helper functions in node; skip without node."""
+def run_js(expr, *functions, prelude=""):
+    """Evaluate one expression in node against the page's own helper functions; skip without node."""
     import re
     import shutil
     import subprocess
     if not shutil.which("node"):
         pytest.skip("node not installed")
     page = dashboard.PAGE.read_text(encoding="utf-8")
-    fn = re.search(r"function median\(values\)\{.*?\n\}\n", page, re.S).group(0)
-    out = subprocess.run(["node", "-e", fn + f"console.log(JSON.stringify({expr}))"], capture_output=True,
-                         text=True, check=True)
+    def source(name):           # a one-line function, else one that closes with "}" on its own line
+        one = re.search(rf"^function {name}\([^\n]*\}}\n", page, re.M)
+        return (one or re.search(rf"^function {name}\(.*?\n\}}\n", page, re.M | re.S)).group(0)
+    code = "".join(source(name) for name in functions)
+    out = subprocess.run(["node", "-e", prelude + code + f"console.log(JSON.stringify({expr}))"],
+                         capture_output=True, text=True, check=True)
     return json.loads(out.stdout)
 
 
 def test_median_averages_the_middle_pair():
-    assert run_js("[median([10, 100]), median([100, 10, 55]), median([]), median([null, 4])]") == [55, 55, None, 4]
+    assert run_js("[median([10, 100]), median([100, 10, 55]), median([]), median([null, 4])]",
+                  "median") == [55, 55, None, 4]
+
+
+@pytest.mark.parametrize("deploy,status", [
+    ("{sha: 'f'.repeat(40)}", "it is the live release"),
+    ("{sha: 'a'.repeat(40)}", "since replaced by aaaaaaaa"),
+    ("null", "current live release unknown"),            # no deployment repo: don't guess
+])
+def test_live_status_only_claims_what_the_deployment_shows(deploy, status):
+    assert run_js("liveStatus('f'.repeat(40))", "short", "liveStatus", prelude=f"var DATA = {{deploy: {deploy}}};") == status
 
 
 def test_empty_dir_does_not_crash(tmp_path):
