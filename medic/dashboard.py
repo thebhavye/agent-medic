@@ -295,9 +295,15 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
+class Server(ThreadingHTTPServer):
+    # On Windows, address reuse lets a second server bind a port that's already serving, and
+    # requests then land on either one. Fail loudly instead.
+    allow_reuse_address = False
+
+
 def serve(port: int, medic_dir: Path) -> None:
     handler = type("BoundHandler", (Handler,), {"medic_dir": Path(medic_dir)})
-    server = ThreadingHTTPServer(("127.0.0.1", port), handler)
+    server = Server(("127.0.0.1", port), handler)
     print(f"[dashboard] http://127.0.0.1:{port}  (reading {medic_dir})", flush=True)
     try:
         server.serve_forever()
