@@ -192,16 +192,41 @@ const early = {phase: "escalated", timeline: [
   {t: 4, phase: "decided"}, {t: 5, phase: "escalated"}]};
 assert.deepStrictEqual(stepsFor(early),
   ["open", "triaged", "investigated", "decided", "escalated"]);
-const late = {phase: "escalated", timeline: [
+const late = {phase: "escalated",
+  remedy: {attempts: [{n: 1, accepted: true}]},
+  timeline: [
   {t: 1, phase: "open"}, {t: 2, phase: "triaged"}, {t: 3, phase: "investigated"},
-  {t: 4, phase: "decided"}, {t: 5, phase: "remedy"}, {t: 6, phase: "deployed"},
-  {t: 7, phase: "escalated"}]};
+  {t: 4, phase: "decided"}, {t: 5, phase: "remedy", msg: "attempt 1: accepted: verified"},
+  {t: 6, phase: "deployed"}, {t: 7, phase: "escalated"}]};
 assert.deepStrictEqual(stepsFor(late),
   ["open", "triaged", "investigated", "decided", "remedied", "deployed", "escalated"]);
 assert.deepStrictEqual(stepsFor({phase: "resolved", timeline: []}),
   ["open", "triaged", "investigated", "decided", "remedied", "deployed", "resolved"]);
 assert.strictEqual(phaseTimes(late)["remedied"], 5);
 assert.strictEqual(phaseTimes(late)["escalated"], 7);
+const allFailed = {phase: "escalated",
+  remedy: {attempts: [{n: 1, accepted: false}, {n: 2, accepted: false}]},
+  timeline: [
+  {t: 1, phase: "open"}, {t: 2, phase: "triaged"}, {t: 3, phase: "investigated"},
+  {t: 4, phase: "decided"},
+  {t: 5, phase: "remedy", msg: "attempt 1: rejected: no usable proposal"},
+  {t: 6, phase: "remedy", msg: "attempt 2: rejected: still broken"},
+  {t: 7, phase: "escalated", msg: "no verified fix after 2 attempts"}]};
+assert.deepStrictEqual(stepsFor(allFailed),
+  ["open", "triaged", "investigated", "decided", "escalated"]);
+assert.strictEqual(phaseTimes(allFailed)["remedied"], undefined);
+const retry = {phase: "escalated",
+  remedy: {attempts: [{n: 1, accepted: false}, {n: 2, accepted: true}]},
+  timeline: [
+  {t: 1, phase: "open"}, {t: 2, phase: "triaged"}, {t: 3, phase: "investigated"},
+  {t: 4, phase: "decided"},
+  {t: 5, phase: "remedy", msg: "attempt 1: rejected: still broken"},
+  {t: 8, phase: "remedy", msg: "attempt 2: accepted: verified"},
+  {t: 9, phase: "deployed", msg: "release abc is live"},
+  {t: 10, phase: "escalated", msg: "monitor failed"}]};
+assert.deepStrictEqual(stepsFor(retry),
+  ["open", "triaged", "investigated", "decided", "remedied", "deployed", "escalated"]);
+assert.strictEqual(phaseTimes(retry)["remedied"], 8);
 const root = document.getElementById("root");
 const stale = document.getElementById("stale");
 const INC = {id: "i1", opened_at: 1791606500, phase: "resolved", release: "aaa",

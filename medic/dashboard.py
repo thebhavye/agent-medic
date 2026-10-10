@@ -417,14 +417,34 @@ function renderProduction(sec, prod){
   grid.appendChild(right);
   sec.appendChild(grid);
 }
-var TIMELINE_STEP = {remedy: "remedied"};
+function acceptedAttempts(inc){
+  return (((inc || {}).remedy || {}).attempts || []).filter(function(a){ return a && a.accepted; });
+}
+function remedyTime(inc){
+  // When remediation completed: the `remedy` timeline event of the accepted attempt.
+  // A bare `remedy` event proves nothing — rejected attempts note one too.
+  var accepted = acceptedAttempts(inc);
+  if (!accepted.length) return null;
+  var nums = {};
+  accepted.forEach(function(a){ if (a.n !== undefined && a.n !== null) nums["attempt " + a.n + ":"] = true; });
+  var lastRemedy = null;
+  var events = (inc || {}).timeline || [];
+  for (var i = 0; i < events.length; i++){
+    var e = events[i];
+    if (!e || e.phase !== "remedy" || typeof e.msg !== "string") continue;
+    lastRemedy = e.t;
+    for (var k in nums){ if (e.msg.indexOf(k) >= 0) return e.t; }
+  }
+  return lastRemedy; // legacy data: accepted attempt but unparseable message
+}
 function phaseTimes(inc){
   var m = {};
   (inc.timeline || []).forEach(function(e){
     if (!e || !e.phase || e.phase in m) return;
     m[e.phase] = e.t;
-    if (TIMELINE_STEP[e.phase] && !(TIMELINE_STEP[e.phase] in m)) m[TIMELINE_STEP[e.phase]] = e.t;
   });
+  var rt = remedyTime(inc);
+  if (rt !== null && rt !== undefined) m["remedied"] = rt;
   return m;
 }
 var RESOLVED_PHASES = ["open", "triaged", "investigated", "decided", "remedied", "deployed", "resolved"];
@@ -433,10 +453,13 @@ function stepsFor(inc){
   var seen = {};
   (inc.timeline || []).forEach(function(e){
     var p = e && e.phase;
-    if (p && TIMELINE_STEP[p]) p = TIMELINE_STEP[p];
+    if (p === "remedy") return; // completion comes from accepted attempts, not events (see below)
     if (p) seen[p] = true;
   });
-  var steps = RESOLVED_PHASES.filter(function(p){ return seen[p]; });
+  var steps = RESOLVED_PHASES.filter(function(p){
+    if (p === "remedied") return acceptedAttempts(inc).length > 0;
+    return seen[p];
+  });
   if (steps.indexOf("open") < 0) steps.unshift("open");
   if (steps[steps.length - 1] !== "escalated") steps.push("escalated");
   return steps;
