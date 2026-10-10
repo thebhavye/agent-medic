@@ -225,6 +225,9 @@ ul{margin:6px 0;padding-left:20px;font-size:13.5px}
 .empty{text-align:center;color:var(--muted);padding:60px 20px}
 .empty .big{font-size:22px;color:var(--fg);margin-bottom:8px}
 a{color:var(--blue)}
+.stale{background:color-mix(in srgb,var(--amber) 18%,transparent);color:var(--amber);
+  border:1px solid var(--amber);border-radius:10px;padding:8px 14px;font-size:13px;margin-bottom:16px}
+[hidden]{display:none !important}
 footer{color:var(--muted);font-size:12px;text-align:center;margin-top:24px}
 </style>
 </head>
@@ -235,12 +238,21 @@ footer{color:var(--muted);font-size:12px;text-align:center;margin-top:24px}
     <span class="deploy" id="deploy">…</span>
     <span class="pill warn" id="pill">LOADING</span>
   </header>
+  <div id="stale" class="stale" hidden></div>
   <div id="root"><div class="empty"><div class="big">Loading…</div></div></div>
   <footer>polls /api/state every 3s · no reload needed</footer>
 </div>
 <script>
 "use strict";
 var lastPhase = null;
+var hasRendered = false;
+function setStale(on){
+  var banner = document.getElementById("stale");
+  if (!banner) return;
+  banner.hidden = !on;
+  if (on) banner.textContent = "STALE — update failed at " + new Date().toLocaleTimeString()
+    + ", showing last good data.";
+}
 function T(tag, text, cls){
   var e = document.createElement(tag);
   if (cls) e.className = cls;
@@ -254,6 +266,27 @@ function fmtPct(x){
 function fmtNum(x, d){
   if (x === null || x === undefined || isNaN(x)) return "—";
   return Number(x).toFixed(d === undefined ? 1 : d);
+}
+function isRateMetric(metric){
+  return /(^|_)rate($|_)|pass_rate/.test(String(metric || ""));
+}
+function fmtMetric(metric, x){
+  if (x === null || x === undefined || isNaN(Number(x))) return "—";
+  if (isRateMetric(metric)) return fmtPct(x);
+  var n = Number(x);
+  if (!isFinite(n)) return "—";
+  return Number.isInteger(n) ? String(n) : String(Math.round(n * 100) / 100);
+}
+function symptomText(s){
+  if (s === null || s === undefined) return "";
+  if (typeof s === "string") return s;
+  if (typeof s !== "object") return String(s);
+  var parts = s.symptom;
+  var label = Array.isArray(parts) ? parts.join(" · ")
+    : (parts === undefined || parts === null ? "" : String(parts));
+  var n = (s.traces === undefined || s.traces === null) ? NaN : Number(s.traces);
+  if (label && !isNaN(n)) return label + " (" + n + (n === 1 ? " trace)" : " traces)");
+  return label;
 }
 function fmtTime(s){
   if (!s) return "—";
@@ -274,6 +307,19 @@ function openIncidents(all){
     return i && ["resolved", "escalated", "done"].indexOf(i.phase) < 0;
   });
 }
+function currentIncident(all){
+  var open = openIncidents(all || []);
+  if (open.length) return open[0];
+  var list = all || [];
+  return list.length ? list[0] : null;
+}
+function statusFor(all){
+  var cur = currentIncident(all);
+  if (!cur) return {cls: "ok", label: "HEALTHY"};
+  if (cur.phase === "escalated") return {cls: "bad", label: "ESCALATED"};
+  if (openIncidents([cur]).length) return {cls: "warn", label: "INCIDENT · " + String(cur.phase).toUpperCase()};
+  return {cls: "ok", label: "HEALTHY"};
+}
 function renderStatus(data){
   var pill = document.getElementById("pill");
   var dep = document.getElementById("deploy");
@@ -284,12 +330,9 @@ function renderStatus(data){
   } else {
     dep.appendChild(T("span", "no deployment yet"));
   }
-  var open = openIncidents(data.incidents);
-  var esc = data.incidents.filter(function(i){ return i && i.phase === "escalated"; });
-  pill.className = "pill " + (esc.length ? "bad" : open.length ? "warn" : "ok");
-  pill.textContent = esc.length ? "ESCALATED"
-    : open.length ? "INCIDENT · " + String(open[0].phase).toUpperCase()
-    : "HEALTHY";
+  var st = statusFor(data.incidents);
+  pill.className = "pill " + st.cls;
+  pill.textContent = st.label;
 }
 function sparkline(svg, vals, color){
   while (svg.firstChild) svg.removeChild(svg.firstChild);
@@ -355,13 +398,11 @@ function renderProduction(sec, prod){
   tbl.appendChild(head);
   var base = prod.baseline || {};
   var cur = prod.current || {};
-  [["failure_rate", fmtPct], ["tool_error_rate", fmtPct],
-   ["tokens_per_run", function(x){ return fmtNum(x, 0); }],
-   ["tool_calls_per_run", function(x){ return fmtNum(x, 2); }]].forEach(function(row){
+  ["failure_rate", "tool_error_rate", "tokens_per_run", "tool_calls_per_run"].forEach(function(metric){
     var tr = document.createElement("tr");
-    tr.appendChild(T("td", row[0]));
-    tr.appendChild(T("td", row[1](base[row[0]]), "mono"));
-    tr.appendChild(T("td", row[1](cur[row[0]]), "mono"));
+    tr.appendChild(T("td", metric));
+    tr.appendChild(T("td", fmtMetric(metric, base[metric]), "mono"));
+    tr.appendChild(T("td", fmtMetric(metric, cur[metric]), "mono"));
     tbl.appendChild(tr);
   });
   right.appendChild(tbl);
@@ -376,20 +417,35 @@ function renderProduction(sec, prod){
   grid.appendChild(right);
   sec.appendChild(grid);
 }
+var TIMELINE_STEP = {remedy: "remedied"};
 function phaseTimes(inc){
   var m = {};
   (inc.timeline || []).forEach(function(e){
-    if (e && e.phase && !(e.phase in m)) m[e.phase] = e.t;
+    if (!e || !e.phase || e.phase in m) return;
+    m[e.phase] = e.t;
+    if (TIMELINE_STEP[e.phase] && !(TIMELINE_STEP[e.phase] in m)) m[TIMELINE_STEP[e.phase]] = e.t;
   });
   return m;
 }
 var RESOLVED_PHASES = ["open", "triaged", "investigated", "decided", "remedied", "deployed", "resolved"];
+function stepsFor(inc){
+  if (!inc || inc.phase !== "escalated") return RESOLVED_PHASES;
+  var seen = {};
+  (inc.timeline || []).forEach(function(e){
+    var p = e && e.phase;
+    if (p && TIMELINE_STEP[p]) p = TIMELINE_STEP[p];
+    if (p) seen[p] = true;
+  });
+  var steps = RESOLVED_PHASES.filter(function(p){ return seen[p]; });
+  if (steps.indexOf("open") < 0) steps.unshift("open");
+  if (steps[steps.length - 1] !== "escalated") steps.push("escalated");
+  return steps;
+}
 function renderIncident(sec, inc){
   sec.appendChild(T("h2", "Current incident · " + (inc.id || "?")));
   sec.appendChild(T("p", "opened " + fmtTime(inc.opened_at) + " · release "
     + String(inc.release || "").slice(0, 8), "sub"));
-  var steps = inc.phase === "escalated"
-    ? ["open", "triaged", "investigated", "decided", "escalated"] : RESOLVED_PHASES;
+  var steps = stepsFor(inc);
   var times = phaseTimes(inc);
   var order = {};
   steps.forEach(function(p, i){ order[p] = i; });
@@ -411,16 +467,21 @@ function renderIncident(sec, inc){
     inc.signals.forEach(function(s){
       var p = T("p", "", "mono");
       p.appendChild(T("span", (s.name || s.metric || "?") + ": "));
-      p.appendChild(T("span", fmtPct(s.baseline) + " → " + fmtPct(s.current)));
+      p.appendChild(T("span", fmtMetric(s.metric, s.baseline) + " → " + fmtMetric(s.metric, s.current)));
       c.appendChild(p);
     });
     cards.appendChild(c);
   }
-  if (inc.triage && (inc.triage.summary || inc.triage.symptoms)) {
+  var triage = inc.triage || {};
+  var symptomLines = (Array.isArray(triage.symptoms) ? triage.symptoms : [triage.symptoms])
+    .map(symptomText).filter(function(s){ return s; });
+  if (triage.summary || symptomLines.length) {
     var ct = T("div", "", "card");
     ct.appendChild(T("h3", "Triage"));
-    if (inc.triage.summary) ct.appendChild(T("p", inc.triage.summary));
-    if (inc.triage.symptoms) ct.appendChild(T("p", "Symptoms: " + inc.triage.symptoms, "muted"));
+    if (triage.summary) ct.appendChild(T("p", triage.summary));
+    symptomLines.forEach(function(s){
+      ct.appendChild(T("p", "• " + s, "muted"));
+    });
     cards.appendChild(ct);
   }
   Object.keys(inc.findings || {}).forEach(function(name){
@@ -486,7 +547,7 @@ function renderIncident(sec, inc){
     cm.appendChild(T("h3", "Monitor"));
     if (inc.monitor.window) cm.appendChild(T("p", JSON.stringify(inc.monitor.window), "mono"));
     (inc.monitor.signals || []).forEach(function(s){
-      cm.appendChild(T("p", (s.name || s.metric || "?") + ": " + fmtPct(s.current), "mono"));
+      cm.appendChild(T("p", (s.name || s.metric || "?") + ": " + fmtMetric(s.metric || s.name, s.current), "mono"));
     });
     cards.appendChild(cm);
   }
@@ -615,6 +676,8 @@ function renderExternal(sec, cases){
 }
 function render(data){
   renderStatus(data);
+  hasRendered = true;
+  setStale(false);
   var root = document.getElementById("root");
   while (root.firstChild) root.removeChild(root.firstChild);
   var prod = data.production || {};
@@ -632,8 +695,7 @@ function render(data){
   renderProduction(s1, prod);
   root.appendChild(s1);
   if (incidents.length) {
-    var open = openIncidents(incidents);
-    var cur = open[0] || incidents[0];
+    var cur = currentIncident(incidents);
     if (lastPhase !== null && lastPhase !== cur.phase) {
       document.getElementById("pill").animate(
         [{transform: "scale(1)"}, {transform: "scale(1.12)"}, {transform: "scale(1)"}],
@@ -660,6 +722,10 @@ function poll(){
   fetch("/api/state", {cache: "no-store"}).then(function(r){ return r.json(); })
     .then(render)
     .catch(function(err){
+      if (hasRendered) {
+        setStale(true);
+        return;
+      }
       var root = document.getElementById("root");
       if (!root.firstChild || !root.querySelector("section")) {
         while (root.firstChild) root.removeChild(root.firstChild);

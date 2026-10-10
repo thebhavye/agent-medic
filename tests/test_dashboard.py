@@ -1,12 +1,16 @@
 """Dashboard /api/state shape: one fake incident plus one fake bench result."""
 
 import json
+import shutil
+import subprocess
 import threading
 import urllib.request
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
-from medic.dashboard import build_state, make_handler
+import pytest
+
+from medic.dashboard import PAGE, build_state, make_handler
 
 
 def write_state(root: Path):
@@ -99,3 +103,139 @@ def test_http_endpoints(tmp_path):
     finally:
         server.shutdown()
         thread.join()
+
+
+def test_incident_shapes_pass_through(tmp_path):
+    write_state(tmp_path)
+    incident = json.loads((tmp_path / "incidents" / "1010-000000-abcd.json").read_text(encoding="utf-8"))
+    incident["triage"]["symptoms"] = [{"symptom": ["tool_error", "search_docs", "TypeError"], "traces": 6}]
+    incident["signals"].append({"name": "tool_calls", "metric": "tool_calls_per_run",
+                                "baseline": 3.0, "current": 5.6666667})
+    (tmp_path / "incidents" / "1010-000000-abcd.json").write_text(json.dumps(incident), encoding="utf-8")
+    older = dict(incident, id="1009-000000-old", opened_at=1791500000.0, phase="escalated")
+    (tmp_path / "incidents" / "1009-000000-old.json").write_text(json.dumps(older), encoding="utf-8")
+    data = build_state(tmp_path)
+    # Newest first: the resolved incident is current despite the older escalation.
+    assert [i["id"] for i in data["incidents"]] == ["1010-000000-abcd", "1009-000000-old"]
+    current = data["incidents"][0]
+    assert current["triage"]["symptoms"] == [
+        {"symptom": ["tool_error", "search_docs", "TypeError"], "traces": 6}]
+    assert current["signals"][-1] == {"name": "tool_calls", "metric": "tool_calls_per_run",
+                                      "baseline": 3.0, "current": 5.6666667}
+
+
+JS_PRELUDE = r"""
+const assert = require("assert");
+let __fetchImpl = () => Promise.reject(new Error("boot"));
+function fetch() { return __fetchImpl(); }
+function setInterval() { return 0; }
+class FakeEl {
+  constructor(tag) { this.tag = tag; this.children = []; this.textContent = "";
+    this.className = ""; this.hidden = false; this.attrs = {}; }
+  appendChild(c) { this.children.push(c); return c; }
+  removeChild(c) { this.children = this.children.filter(function(x){ return x !== c; }); }
+  get firstChild() { return this.children[0] || null; }
+  setAttribute(k, v) { this.attrs[k] = v; }
+  querySelector(sel) {
+    if (this.tag === sel) return this;
+    for (const c of this.children) {
+      const f = c.querySelector ? c.querySelector(sel) : null;
+      if (f) return f;
+    }
+    return null;
+  }
+  animate() {}
+}
+const __ids = {};
+function __el(id) {
+  if (!__ids[id]) { __ids[id] = new FakeEl("div"); __ids[id].id = id; }
+  return __ids[id];
+}
+const document = {
+  createElement: function(t) { return new FakeEl(t); },
+  createElementNS: function(ns, t) { return new FakeEl(t); },
+  getElementById: function(id) { return __el(id); },
+};
+"""
+
+JS_DRIVER = r"""
+(async () => {
+const tick = () => new Promise(function(r){ setTimeout(r, 20); });
+assert.strictEqual(fmtMetric("failure_rate", 0.005), "0.5%");
+assert.strictEqual(fmtMetric("tool_error_rate", 0.3333333), "33.3%");
+assert.strictEqual(fmtMetric("tool_calls_per_run", 5.6666667), "5.67");
+assert.strictEqual(fmtMetric("tokens_per_run", 2618), "2618");
+assert.strictEqual(fmtMetric("tokens_per_run", 1605.6666667), "1605.67");
+assert.strictEqual(fmtMetric("canary_pass_rate", 0.75), "75.0%");
+assert.strictEqual(fmtMetric("cost_per_run", 0.006), "0.01");
+assert.strictEqual(fmtMetric("tool_calls_per_run", null), "—");
+assert.strictEqual(fmtMetric("failure_rate", undefined), "—");
+assert.strictEqual(symptomText({symptom: ["tool_error", "search_docs", "TypeError"], traces: 3}),
+  "tool_error · search_docs · TypeError (3 traces)");
+assert.strictEqual(symptomText({symptom: ["healthy"], traces: 1}), "healthy (1 trace)");
+assert.strictEqual(symptomText("legacy string"), "legacy string");
+assert.strictEqual(symptomText(null), "");
+assert.strictEqual(symptomText({}), "");
+assert.strictEqual(symptomText({symptom: ["a"]}), "a");
+assert.strictEqual(symptomText(42), "42");
+assert.strictEqual(symptomText({symptom: "odd", traces: null}), "odd");
+const esc = {id: "old", opened_at: 100, phase: "escalated"};
+const res = {id: "new", opened_at: 200, phase: "resolved"};
+const opn = {id: "o", opened_at: 150, phase: "decided"};
+assert.deepStrictEqual(statusFor([]), {cls: "ok", label: "HEALTHY"});
+assert.deepStrictEqual(statusFor([res, esc]), {cls: "ok", label: "HEALTHY"});
+assert.deepStrictEqual(statusFor([esc]), {cls: "bad", label: "ESCALATED"});
+assert.deepStrictEqual(statusFor([opn]), {cls: "warn", label: "INCIDENT · DECIDED"});
+assert.deepStrictEqual(statusFor([res, opn]), {cls: "warn", label: "INCIDENT · DECIDED"});
+const early = {phase: "escalated", timeline: [
+  {t: 1, phase: "open"}, {t: 2, phase: "triaged"}, {t: 3, phase: "investigated"},
+  {t: 4, phase: "decided"}, {t: 5, phase: "escalated"}]};
+assert.deepStrictEqual(stepsFor(early),
+  ["open", "triaged", "investigated", "decided", "escalated"]);
+const late = {phase: "escalated", timeline: [
+  {t: 1, phase: "open"}, {t: 2, phase: "triaged"}, {t: 3, phase: "investigated"},
+  {t: 4, phase: "decided"}, {t: 5, phase: "remedy"}, {t: 6, phase: "deployed"},
+  {t: 7, phase: "escalated"}]};
+assert.deepStrictEqual(stepsFor(late),
+  ["open", "triaged", "investigated", "decided", "remedied", "deployed", "escalated"]);
+assert.deepStrictEqual(stepsFor({phase: "resolved", timeline: []}),
+  ["open", "triaged", "investigated", "decided", "remedied", "deployed", "resolved"]);
+assert.strictEqual(phaseTimes(late)["remedied"], 5);
+assert.strictEqual(phaseTimes(late)["escalated"], 7);
+const root = document.getElementById("root");
+const stale = document.getElementById("stale");
+const INC = {id: "i1", opened_at: 1791606500, phase: "resolved", release: "aaa",
+  signals: [], triage: {summary: "s", symptoms: [{symptom: ["tool_error", "x"], traces: 2}]},
+  findings: {}, decision: {}, remedy: {attempts: []}, deploy: {}, monitor: {},
+  timeline: [{t: 1791606500, phase: "open", msg: "o"}]};
+const GOOD = {production: {n_traces: 0, traces: [], baseline: null, current: {n: 0}, canary: null},
+  incidents: [INC], deploy: null, bench: [], external: []};
+__fetchImpl = () => Promise.resolve({json: () => Promise.resolve(GOOD)});
+poll(); await tick(); await tick();
+assert.ok(root.querySelector("section"), "sections render after success");
+assert.strictEqual(stale.hidden, true);
+__fetchImpl = () => Promise.reject(new Error("down"));
+poll(); await tick(); await tick();
+assert.ok(root.querySelector("section"), "data kept after failure");
+assert.strictEqual(stale.hidden, false);
+assert.ok(/STALE/.test(stale.textContent));
+poll(); await tick(); await tick();
+assert.strictEqual(stale.hidden, false, "still stale, single banner node");
+__fetchImpl = () => Promise.resolve({json: () => Promise.resolve(GOOD)});
+poll(); await tick(); await tick();
+assert.strictEqual(stale.hidden, true, "banner clears on recovery");
+console.log("JS-OK");
+})().catch(function(e) { console.error("JS-FAIL: " + (e && e.stack || e)); process.exit(1); });
+"""
+
+
+def test_js_rendering_logic(tmp_path):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not available for dashboard JS tests")
+    script = PAGE[PAGE.index("<script>") + len("<script>"):PAGE.index("</script>")]
+    harness = tmp_path / "dash.js"
+    harness.write_text(JS_PRELUDE + script + JS_DRIVER, encoding="utf-8")
+    proc = subprocess.run([node, str(harness)], capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    assert "JS-OK" in proc.stdout
