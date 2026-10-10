@@ -80,10 +80,12 @@ def review(edits: list[dict], root: Path, target: dict, suspects: list[dict] | N
     if off_target:
         problems.append(f"edits outside the target file {target['file']}: {sorted(set(off_target))}")
     else:
-        # In the right file is not enough: the edit has to touch the target's own lines.
+        # In the right file is not enough: the edit has to touch the target's own lines, or a
+        # line that names it directly (a tool's dispatch entry, a registration, its call site).
         for e in edits:
             span = _location(root / e["path"], e["find"])
-            if span and (span[1] < target["start"] - LINE_SLACK or span[0] > target["end"] + LINE_SLACK):
+            if span and (span[1] < target["start"] - LINE_SLACK or span[0] > target["end"] + LINE_SLACK) \
+                    and not _names_target(e["find"], target):
                 problems.append(f"edits lines {span[0]}-{span[1]}, outside the target "
                                 f"{target['kind']} {target['name']} (lines {target['start']}-{target['end']})")
     changed = sum(max(len(e["find"].splitlines()), len(e["replace"].splitlines())) for e in edits)
@@ -97,6 +99,14 @@ def review(edits: list[dict], root: Path, target: dict, suspects: list[dict] | N
 
 
 LINE_SLACK = 3      # an edit may start or end a few lines outside its target (decorators, a blank line)
+
+
+def _names_target(find: str, target: dict) -> bool:
+    """Every changed line of the edit refers to the target by name, e.g. the dispatch entry
+    `"search_docs": lambda args: search_docs(args["query"])` for the tool_handler search_docs."""
+    name = target.get("name")
+    lines = [line for line in find.splitlines() if line.strip()]
+    return bool(name and lines) and all(re.search(rf"\b{re.escape(name)}\b", line) for line in lines)
 
 
 def _location(path: Path, find: str) -> tuple[int, int] | None:

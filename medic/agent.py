@@ -35,6 +35,10 @@ class Medic:
             self.log(f"[medic] {added} new production traces")
         self._refresh_standby()
         open_now = incidents.open_incidents()
+        if open_now:
+            # neatlogs may raise the same incident a moment after Medic opened it: attach its
+            # alert to the open incident, so both detectors' accounts meet there.
+            self._attach_alerts(open_now[-1], self._neatlogs_alerts())
         for inc in open_now:
             self.step(inc)
         if open_now:
@@ -59,6 +63,9 @@ class Medic:
                                       float(a.get("count") or 0)) for a in alerts)]
         if signals and not self._recently_escalated(signals):
             self.open(signals, alerts)
+        # check() may just have recorded the healthy release: arm the runtime now, not a tick
+        # later, so a release that breaks right away already meets an armed runtime.
+        self._refresh_standby()
 
     # -- neatlogs ------------------------------------------------------------------------
 
@@ -80,21 +87,53 @@ class Medic:
             self.log(f"[neatlogs] alert history unavailable: {type(exc).__name__}: {exc}")
             return []
 
-    def _tell_neatlogs(self, inc: Incident, text: str, resolved: bool = False) -> None:
-        """Write what Medic did onto the failing traces in neatlogs (and close its fix suggestion)."""
-        api = self._neatlogs()
-        if api is None:
+    def _attach_alerts(self, inc: Incident, alerts: list[dict]) -> None:
+        if not alerts:
             return
-        traces = inc.neatlogs.get("sample_trace_ids") or [t for t in inc.trace_ids][-3:]
-        try:
-            n = neatlogs_link.annotate(api, traces, f"Agent Medic, incident {inc.id}: {text}")
-        except Exception as exc:  # noqa: BLE001
-            n = 0
-            self.log(f"[neatlogs] could not annotate traces: {type(exc).__name__}: {exc}")
-        inc.neatlogs.setdefault("notes", []).append({"at": time.time(), "text": text, "traces": n})
-        suggestion = (inc.findings.get("neatlogs") or {}).get("suggestion_id")
-        if resolved and suggestion and neatlogs_link.update_fix(suggestion, "resolved"):
-            inc.neatlogs["suggestion_resolved"] = suggestion
+        first = alerts[0]
+        samples = [t for a in alerts for t in a.get("sampleTraceIds") or []]
+        if not inc.neatlogs.get("alert"):
+            inc.neatlogs["alert"] = {k: first.get(k) for k in ("id", "ruleId", "ruleName", "detectionName", "firedAt",
+                                                               "count", "threshold", "windowMinutes", "investigationTarget")}
+        inc.neatlogs["alerts"] = inc.neatlogs.get("alerts", 0) + len(alerts)
+        inc.neatlogs["sample_trace_ids"] = list(dict.fromkeys((inc.neatlogs.get("sample_trace_ids") or []) + samples))[:10]
+        inc.note("neatlogs", "neatlogs raised it too: " + "; ".join(
+            f"{a.get('ruleName')} ({a.get('count')} hits)" for a in alerts), self.log)
+        incidents.save(inc)
+
+    def _card_id(self, inc: Incident) -> str | None:
+        return ((inc.findings.get("neatlogs") or {}).get("suggestion_id")
+                or (inc.neatlogs.get("card") or {}).get("suggestion_id"))
+
+    def _tell_neatlogs(self, inc: Incident, text: str, resolved: bool = False, **sections) -> None:
+        """Record what Medic did, and put its proven account on neatlogs' fix card for this
+        incident: each milestone appends a version, so the card's history shows the healing."""
+        if self._neatlogs() is None:
+            return
+        if resolved or inc.phase in ("deployed", "escalated"):
+            self._late_neatlogs_card(inc)
+        notes = inc.neatlogs.setdefault("notes", [])
+        notes.append({"at": time.time(), "text": text, "card": False})
+        card = self._card_id(inc)
+        if card:
+            evidence = (f"**Agent Medic**, incident `{inc.id}`: what was proven and done\n\n"
+                        + "\n".join(f"- {time.strftime('%H:%M:%S', time.localtime(n['at']))} {n['text']}" for n in notes))
+            notes[-1]["card"] = neatlogs_link.update_card(card, evidence_reasoning=evidence, **sections)
+        if resolved and card and neatlogs_link.update_fix(card, "resolved", note=f"Agent Medic: {text}"):
+            inc.neatlogs["suggestion_resolved"] = card
+
+    def _late_neatlogs_card(self, inc: Incident) -> None:
+        """neatlogs investigates on its own schedule, often after Medic's diagnosis: look again,
+        and attach its card so the two accounts of the incident meet."""
+        if (inc.findings.get("neatlogs") or {}).get("verdict") == "root_cause" or inc.neatlogs.get("card"):
+            return
+        traces = list(dict.fromkeys((inc.neatlogs.get("sample_trace_ids") or []) + inc.trace_ids))
+        card = neatlogs_link.investigate(traces, inc.opened_at)
+        if card.get("verdict") == "root_cause":
+            inc.neatlogs["card"] = card
+            inc.note("neatlogs", f"neatlogs' investigation arrived: \"{card['detail']}\" "
+                                 f"({card['confidence']:.0%}); Medic's diagnosis: "
+                                 f"{inc.decision.get('cause', '').replace('_', ' ')}", self.log)
 
     def _refresh_standby(self) -> None:
         """Keep the runtime armed: the last known good of every registered part, from the
@@ -206,8 +245,11 @@ class Medic:
         if any(s["name"] == "quality" for s in inc.signals) and last.get("failed"):
             inc.triage["examples"] = [{"question": f["question"], "answer": f["answer"], "expect": f["expect"],
                                        "tool_errors": []} for f in last["failed"][:4]]
-            inc.triage["summary"] = (f"canary: {len(last['failed'])}/{last['n']} known-answer questions now answered "
-                                     "wrong, while production traces show no errors")
+            canary_line = f"canary: {len(last['failed'])}/{last['n']} known-answer questions now answered wrong"
+            if any(s["name"] in ("tool_errors", "failures") for s in inc.signals):
+                inc.triage["summary"] = f"{inc.triage['summary']}; {canary_line}"   # both: keep the trace evidence
+            else:
+                inc.triage["summary"] = f"{canary_line}, while production traces show no errors"
         if self._neatlogs() is not None:
             inc.triage["investigators"].append("neatlogs")    # neatlogs' own investigation, as evidence
         inc.note("triaged", f"{inc.triage['summary']}; sending {', '.join(inc.triage['investigators'])}", self.log)
@@ -262,9 +304,15 @@ class Medic:
             inc.note("decided", f"settled: {note}", self.log)
         inc.phase = "escalated" if d["remedy"] == "escalate" else "decided"
         culprit = f"; culprit commit {d['culprit'][:8]}" if d.get("culprit") else ""
+        reg = inc.findings.get("regression") or {}
+        proven = (f"**Proven by Agent Medic** ({d['confidence']:.0%}): {d['cause'].replace('_', ' ')}."
+                  + (f" The first bad commit is `{d['culprit'][:8]}` \"{reg.get('culprit_subject', '')}\": the release "
+                     f"before it passes the known-answer eval against today's dependencies and this one fails it."
+                     if d.get("culprit") else "")
+                  + "\n\n" + "\n".join(f"- {r}" for r in d.get("rationale", [])))
         self._tell_neatlogs(inc, f"diagnosed {d['cause'].replace('_', ' ')} ({d['confidence']:.0%} confidence){culprit}; "
                                  + ("no safe automatic fix, a human is paged" if inc.phase == "escalated"
-                                    else f"remedy: {d['remedy'].replace('_', ' ')}"))
+                                    else f"remedy: {d['remedy'].replace('_', ' ')}"), root_cause=proven)
         if inc.phase == "escalated":
             inc.note("escalated", "no safe automatic fix for this cause; paging a human", self.log)
         elif d.get("cause") == "code_regression":
@@ -407,8 +455,16 @@ class Medic:
         if inc.deploy["deployed"]:
             inc.note("deployed", f"release {inc.deploy['release'][:8]} is live", self.log)
             accepted = next((a for a in reversed(inc.remedy.get("attempts", [])) if a.get("accepted")), {})
+            diff = "\n".join(f"```diff\n# {e['path']}\n" + "\n".join(f"- {l}" for l in e["find"].splitlines())
+                             + "\n" + "\n".join(f"+ {l}" for l in e["replace"].splitlines()) + "\n```"
+                             for e in accepted.get("edits", []))
+            action = (f"**Shipped by Agent Medic**: \"{accepted.get('commit_title', '')}\" (release "
+                      f"`{inc.deploy['release'][:8]}`), verified on {(accepted.get('metrics') or {}).get('n', '?')} runs at "
+                      f"{(accepted.get('metrics') or {}).get('pass_rate', 0):.0%} and promoted after a healthy canary."
+                      f"\n\n{accepted.get('diagnosis', '')}\n\n{diff}")
             self._tell_neatlogs(inc, f"fix promoted after a healthy canary: release {inc.deploy['release'][:8]}"
-                                     + (f" \"{accepted['commit_title']}\"" if accepted.get("commit_title") else ""))
+                                     + (f" \"{accepted['commit_title']}\"" if accepted.get("commit_title") else ""),
+                                recommended_action_md=action)
             inc.phase = "deployed"
             # The bundle is bound to the broken release, so the cure already runs without it;
             # removing it makes that explicit, and monitoring judges the cure on its own.

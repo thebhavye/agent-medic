@@ -325,30 +325,39 @@ def investigate(trace_ids: list[str], opened_at: float, workflow: str = paths.WO
 
 # -- writing back -------------------------------------------------------------------------
 
-def annotate(api: Api, trace_ids: list[str], comment: str, issue_types: list[str] | None = None, limit: int = 3) -> int:
-    """Leave Medic's account of the incident on a few of the failing traces. Returns how many."""
-    done = 0
-    for trace_id in trace_ids[:limit]:
-        try:
-            api.call("POST", f"/traces/{trace_id}/feedback",
-                     {"comment": comment[:2000], "issueTypes": issue_types or ["agent-medic"], "rating": 1})
-            done += 1
-        except NeatlogsError:
-            continue
-    return done
+# Trace feedback and comments are for people (neatlogs accepts them only from a user's OAuth
+# login). Medic writes where automation belongs: its own work is traced into neatlogs (one
+# session per incident), and its proven findings go onto neatlogs' fix card as new versions.
+# Card edits are recorded under a person's team email, which neatlogs asks the user to agree
+# to: Medic writes them only when the user has set NEATLOGS_USER_EMAIL.
+
+def _email() -> str | None:
+    return os.environ.get("NEATLOGS_USER_EMAIL") or None
 
 
-def update_fix(suggestion_id: str | None, status: str, mcp: Mcp | None = None) -> bool:
-    """Move neatlogs' fix card on its board (e.g. to resolved once the cure holds), which also
-    starts neatlogs' own verification watch.
+def update_card(triage_id: str | None, mcp: Mcp | None = None, **sections) -> bool:
+    """Add Medic's proven findings to neatlogs' fix card: root_cause, evidence_reasoning,
+    recommended_action_md (markdown; each edit appends a version) or resolution_note."""
+    email = _email()
+    fields = {k: v for k, v in sections.items() if v}
+    if not triage_id or not email or not fields:
+        return False
+    try:
+        (mcp or Mcp().connect()).tool("triage_update", triage_id=triage_id, user_email=email, **fields)
+        return True
+    except Exception:  # noqa: BLE001
+        return False
 
-    neatlogs records the change under a person's team email and asks that the user agree to
-    it: Medic only does this when NEATLOGS_USER_EMAIL has been set by the user."""
-    email = os.environ.get("NEATLOGS_USER_EMAIL")
+
+def update_fix(suggestion_id: str | None, status: str, note: str = "", mcp: Mcp | None = None) -> bool:
+    """Move neatlogs' fix card on its board. `resolved` (the fix shipped) also opens neatlogs'
+    own verification watch; resolved and archived need a resolution note."""
+    email = _email()
     if not suggestion_id or not email:
         return False
     try:
-        (mcp or Mcp().connect()).tool("triage_update_status", triage_id=suggestion_id, user_email=email, status=status)
+        (mcp or Mcp().connect()).tool("triage_update_status", triage_id=suggestion_id, user_email=email, status=status,
+                                      **({"resolution_note": note[:1000]} if note else {}))
         return True
     except Exception:  # noqa: BLE001
         return False

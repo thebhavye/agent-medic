@@ -105,11 +105,38 @@ def test_medic_opens_its_incident_from_the_neatlogs_alert(nl, monkeypatch):
     assert any("neatlogs alert" in e["msg"] for e in inc.timeline)
 
 
-def test_annotate_writes_medics_account_onto_the_traces(nl):
+def test_write_back_goes_onto_the_neatlogs_card_as_versions(nl, monkeypatch):
     fake, api = nl
-    assert neatlogs_link.annotate(api, ["t1", "t2", "t3", "t4"], "healed: release abc healthy") == 3
-    assert fake.feedback[0][0] == "t1" and "healed" in fake.feedback[0][1]["comment"]
-    assert fake.feedback[0][1]["issueTypes"] == ["agent-medic"]
+    neatlogs_link.setup(api, log=lambda m: None)                     # configured
+    calls = []
+    monkeypatch.setattr(neatlogs_link, "update_card", lambda card, **kw: calls.append(("card", card, kw)) or True)
+    monkeypatch.setattr(neatlogs_link, "update_fix", lambda card, status, note="": calls.append(("fix", card, status, note)) or True)
+    monkeypatch.setattr(neatlogs_link, "investigate", lambda *a, **k: {"verdict": "none"})
+    m = Medic.__new__(Medic)
+    m.log = lambda msg: None
+    inc = agent_mod.Incident(signals=[], release="b" * 40, healthy_release="a" * 40, trace_ids=["t1"], id="inc1",
+                             phase="decided")
+    inc.findings = {"neatlogs": {"verdict": "root_cause", "suggestion_id": "card-1"}}
+    m._tell_neatlogs(inc, "diagnosed code regression", root_cause="**Proven**")
+    inc.phase = "resolved"
+    m._tell_neatlogs(inc, "healed", resolved=True)
+    first, second, closed = calls
+    assert first[0] == "card" and first[2]["root_cause"] == "**Proven**" and "diagnosed" in first[2]["evidence_reasoning"]
+    assert "healed" in second[2]["evidence_reasoning"] and "diagnosed" in second[2]["evidence_reasoning"]   # history grows
+    assert closed[:3] == ("fix", "card-1", "resolved") and "healed" in closed[3]
+    assert inc.neatlogs["suggestion_resolved"] == "card-1" and all(n["card"] for n in inc.neatlogs["notes"])
+
+
+def test_alerts_during_an_open_incident_are_attached_to_it(nl, monkeypatch):
+    monkeypatch.setattr(agent_mod.incidents, "save", lambda inc: None)
+    m = Medic.__new__(Medic)
+    m.log = lambda msg: None
+    inc = agent_mod.Incident(signals=[], release="b" * 40, healthy_release="a" * 40, trace_ids=[], id="inc1")
+    m._attach_alerts(inc, [{"id": "a1", "ruleName": "Medic: tool call failed (3 in 5 min)", "count": 3,
+                            "sampleTraceIds": ["t1", "t2"]}])
+    assert inc.neatlogs["alert"]["ruleName"].startswith("Medic: tool call failed")
+    assert inc.neatlogs["sample_trace_ids"] == ["t1", "t2"]
+    assert any("neatlogs raised it too" in e["msg"] for e in inc.timeline)
 
 
 class FakeMcp(BaseHTTPRequestHandler):
@@ -183,8 +210,11 @@ def test_moving_the_neatlogs_card_needs_the_users_email(mcp_server, monkeypatch)
     assert neatlogs_link.update_fix("s1", "resolved", mcp=mcp) is False
     assert not any(t == "triage_update_status" for t, _ in FakeMcp.args)
     monkeypatch.setenv("NEATLOGS_USER_EMAIL", "team@example.com")
-    assert neatlogs_link.update_fix("s1", "resolved", mcp=mcp) is True
-    assert ("triage_update_status", {"triage_id": "s1", "user_email": "team@example.com", "status": "resolved"}) in FakeMcp.args
+    assert neatlogs_link.update_fix("s1", "resolved", note="Agent Medic: healed", mcp=mcp) is True
+    assert ("triage_update_status", {"triage_id": "s1", "user_email": "team@example.com", "status": "resolved",
+                                     "resolution_note": "Agent Medic: healed"}) in FakeMcp.args
+    assert neatlogs_link.update_card("s1", mcp=mcp, root_cause="**Proven**", evidence_reasoning="") is True
+    assert ("triage_update", {"triage_id": "s1", "user_email": "team@example.com", "root_cause": "**Proven**"}) in FakeMcp.args
 
 
 def test_unreachable_neatlogs_never_stops_the_diagnosis():

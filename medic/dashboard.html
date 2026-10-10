@@ -732,7 +732,7 @@ function healStage(inc){
   var notes = (inc.neatlogs || {}).notes || [];
   var written = notes.length ? h("div", {class:"box sunk", style:"margin-top:4px"}, h("h4", null, "Written back to neatlogs"),
     notes.map(function(n){ return h("div", {style:"font-size:13px;padding:2px 0"}, h("span", {class:"mono faint"}, clock(n.at) + " "), n.text,
-      h("span", {class:"faint"}, n.traces ? " · on " + n.traces + " trace" + (n.traces > 1 ? "s" : "") : " · not delivered")); }),
+      h("span", {class:"faint"}, n.card ? " · added to neatlogs' fix card" : " · in Medic's neatlogs traces")); }),
     inc.neatlogs.suggestion_resolved ? h("div", {style:"font-size:13px;margin-top:4px;color:var(--ok)"}, "neatlogs fix suggestion marked resolved") : null) : null;
   return stage(6, done ? "done" : reached(inc, "deployed") ? "now" : "pending", "Healed", took(inc, "deployed", "resolved"),
     done ? "After promotion Medic kept watching: " + (m.n || 0) + " production traces at a " + pct(m.failure_rate) + " failure rate. Incident closed."
