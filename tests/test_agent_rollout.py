@@ -87,6 +87,21 @@ def test_canary_phase_without_its_rollout_goes_back_to_deploy(medic):
     assert inc.phase == "remedied" and calls["promote"] == 0
 
 
+def test_eval_timeout_stops_canary_traffic(medic, monkeypatch):
+    import subprocess
+    m, calls, state = medic
+    inc = incident()
+    m.do_deploy(inc)
+    state["verdict"] = {"verdict": "healthy", "detail": "4 canary traces at 0%", "state": state["active"]}
+
+    def timeout(*a, **kw):
+        raise subprocess.TimeoutExpired("run_eval", 1800)
+    monkeypatch.setattr(agent_mod.canary, "run", timeout)
+    m.do_canary(inc)
+    assert calls["promote"] == 0 and calls["finish"] == 1 and state["active"] is None
+    assert inc.phase == "escalated" and "TimeoutExpired" in inc.deploy["canary_verdict"]["detail"]
+
+
 def test_clean_traces_with_wrong_answers_roll_back(medic):
     m, calls, state = medic
     inc = incident()

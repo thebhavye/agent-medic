@@ -202,12 +202,17 @@ class Medic:
         if verdict["verdict"] == "healthy":
             # Clean traces don't prove right answers: a confidently wrong fix looks clean. The
             # candidate also has to pass the known-answer eval before it reaches everyone.
-            record = canary.run(self.watcher.state, self.log, code_dir=rollout.root(), sha=active["candidate"])
-            save_state(self.watcher.state)
-            ok, detail = canary.answers_hold(record, self.watcher.state)
-            verdict = {**verdict, "answers": detail}
-            if not ok:
-                verdict.update(verdict="regressed", detail=f"{verdict['detail']}, but {detail}")
+            try:
+                record = canary.run(self.watcher.state, self.log, code_dir=rollout.root(), sha=active["candidate"])
+            except Exception as e:  # noqa: BLE001 - a crashed or timed-out eval must not leave the canary serving
+                verdict = {**verdict, "verdict": "inconclusive",
+                           "detail": f"the known-answer eval on the candidate failed ({type(e).__name__}: {e})"}
+            else:
+                save_state(self.watcher.state)
+                ok, detail = canary.answers_hold(record, self.watcher.state)
+                verdict = {**verdict, "answers": detail}
+                if not ok:
+                    verdict.update(verdict="regressed", detail=f"{verdict['detail']}, but {detail}")
         inc.deploy["canary_verdict"] = {k: v for k, v in verdict.items() if k != "state"}
         if verdict["verdict"] == "healthy":
             inc.note("canary", f"canary healthy: {verdict['detail']}; {verdict['answers']}; promoting", self.log)
