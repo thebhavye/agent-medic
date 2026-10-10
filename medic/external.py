@@ -427,7 +427,55 @@ def propose(spec: dict, case: Case) -> dict:
                            "--priority", "high", "--body", body], cwd=spec["repo"], capture_output=True, text=True)
     out["trail"] = (proc.stdout or proc.stderr).strip()[-400:]
     out["trail_created"] = proc.returncode == 0
+    if out["trail_created"]:
+        out["findings"] = add_findings(spec, case, a)
     return out
+
+
+def _public(text: str) -> str:
+    """Strip local filesystem paths before anything is posted publicly."""
+    text = re.sub(r"[A-Za-z]:[\\/][^\s:'\"]*[\\/](?=[\w.-]+\.py)", "", text)
+    return re.sub(r"(/home|/Users)/[^\s:'\"]*/(?=[\w.-]+\.py)", "", text)
+
+
+def add_findings(spec: dict, case: Case, accepted: dict) -> list[str]:
+    """Post Medic's evidence on the Trail as findings, so reviewers see why, not just what."""
+    p = case.findings.get("provider", {})
+    first_error = (case.triage.get("errors") or [{}])[0]
+    failing_traces = [r["trace_id"] for r in case.runs if r.get("trace_id")]
+    ok_runs = [r for r in accepted.get("verification", []) if (r.get("trace_status") or "").upper() == "OK"]
+    findings = [
+        ("high", p.get("confidence", 0.9), f"{spec['subdir']}/agents.py",
+         f"Root cause: {case.decision.get('cause')}. "
+         f"Every run failed at the `{first_error.get('type')} {first_error.get('span')}` span "
+         f"(neatlogs traces {', '.join(t[:12] for t in failing_traces)}): {first_error.get('message', '')[:300]}\n\n"
+         + "\n".join(f"- {r}" for r in case.decision.get("rationale", []))),
+        ("low", 0.9, None,
+         "Verification: the fixed example was run against the live Gemini API. "
+         + "; ".join(f"`{r['topic']}`: exit {r['exit']}, neatlogs trace {r['trace_id'][:12]} {r['trace_status']}"
+                     for r in accepted.get("verification", []) if r.get("trace_id"))
+         + (f". {len(ok_runs)} run(s) completed the whole 4-agent pipeline." if ok_runs else "")),
+    ]
+    follow_ups = list(dict.fromkeys(f for x in case.attempts for f in x.get("follow_ups", [])
+                                    if not QUOTA.search(f)))
+    warnings = sorted({w for x in case.attempts for w in x.get("remaining_warnings", [])} |
+                      {w for x in case.attempts for r in x.get("verification", []) for w in r.get("warnings", [])
+                       if re.search(r"renamed|deprecated", w, re.I)})
+    for f in follow_ups[:2]:
+        findings.append(("medium", 0.6, None, f"Not fixed here, seen while verifying: {_public(f)}"))
+    for w in warnings[:1]:
+        findings.append(("medium", 0.8, f"{spec['subdir']}/requirements.txt",
+                         f"Not fixed here: runtime deprecation warning `{_public(w)[-220:]}`"))
+    posted = []
+    for severity, confidence, path, body in findings:
+        cmd = ["entire", "trail", "finding", "add", "--repo", spec["forge"], "--branch", accepted["branch"],
+               "--severity", severity, "--confidence", f"{confidence:.2f}", "-m", body]
+        if path:
+            cmd += ["--file", path]
+        proc = subprocess.run(cmd, cwd=spec["repo"], capture_output=True, text=True,
+                              env={**os.environ, "MSYS_NO_PATHCONV": "1"})
+        posted.append(f"{severity}: {'ok' if proc.returncode == 0 else (proc.stderr or proc.stdout).strip()[-160:]}")
+    return posted
 
 
 def report(spec: dict, case: Case) -> str:
