@@ -26,7 +26,7 @@ from medic.watcher import RECENT              # the window Medic decides health 
 
 PAGE = Path(__file__).with_name("dashboard.html")
 TRACE_LIMIT = 120
-PHASES = ["open", "triaged", "investigated", "decided", "remedied", "canary", "deployed", "resolved"]
+PHASES = ["open", "triaged", "investigated", "decided", "first_aid", "remedied", "canary", "deployed", "resolved"]
 
 
 def _read_json(path: Path):
@@ -187,6 +187,7 @@ def incident_view(inc: dict) -> dict:
                    "from": deploy.get("from"),
                    "release": deploy.get("release"), "deployed": deploy.get("deployed"), "at": deploy.get("at")},
         "monitor": inc.get("monitor") or {},
+        "first_aid": inc.get("first_aid") or {},
     }
 
 

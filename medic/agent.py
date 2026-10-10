@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import neatlogs
 
-from medic import anatomy, canary, coordinator, incidents, localize, paths, remedy, rollout, triage, world
+from medic import anatomy, canary, coordinator, first_aid, incidents, localize, paths, remedy, rollout, triage, world
 from medic.incidents import Incident
 from medic.investigators import dependency, loops, regression
 from medic.watcher import RECENT, Signal, Watcher, compare, save_state
@@ -32,12 +32,18 @@ class Medic:
         added = self.watcher.poll()
         if added:
             self.log(f"[medic] {added} new production traces")
+        self._refresh_standby()
         open_now = incidents.open_incidents()
         for inc in open_now:
             self.step(inc)
         if open_now:
             return
         signals, current = self.watcher.check()
+        # The runtime healing a request by itself is an incident too: the code is still broken.
+        recent = self.watcher.recent()
+        healed = [e for e in recent if any(f.startswith("auto:") for f in e.first_aid)]
+        if healed:
+            signals = [*signals, Signal("self_healed", "self_healed_rate", 0.0, len(healed) / len(recent))]
         # Wrong-but-confident answers leave no trace signal; the canary eval catches them.
         if self.watcher.state.get("baseline") and canary.due(self.watcher.state):
             canary.run(self.watcher.state, self.log)
@@ -47,6 +53,30 @@ class Medic:
                 signals = [*signals, Signal(**quality)]
         if signals and not self._recently_escalated(signals):
             self.open(signals)
+
+    def _refresh_standby(self) -> None:
+        """Keep the runtime armed: the last known good of every registered part, from the
+        healthy release, ready for the runtime to engage by itself."""
+        healthy = self.watcher.state.get("healthy_release")
+        if not healthy:
+            return
+        try:
+            live = world.head()
+            current = first_aid.current_standby()
+            # Rebuilt when the healthy release moves, when a new release goes live (it may
+            # register parts the old standby doesn't cover), and well before it expires.
+            fresh = (current and current.get("good_release") == healthy[:12]
+                     and current.get("live_release") == live[:12]
+                     and time.time() - float(current.get("issued_at") or 0) < first_aid.STANDBY_TTL_S / 2)
+            if fresh:
+                return
+            body = first_aid.standby(paths.DEPLOY, world.git("rev-parse", healthy), live,
+                                     baseline=self.watcher.state.get("baseline"))
+            first_aid.write(first_aid.standby_path(), body)
+            self.log(f"[medic] runtime armed: last known good of {len(body['functions']) + len(body['values'])} "
+                     f"parts from {healthy[:8]}")
+        except Exception as exc:  # noqa: BLE001 - arming is best effort; detection still works
+            self.log(f"[medic] could not arm the runtime: {type(exc).__name__}: {exc}")
 
     def _recently_escalated(self, signals) -> bool:
         """Don't reopen the same problem every tick while a human handles an escalation."""
@@ -71,6 +101,19 @@ class Medic:
         inc = Incident(signals=[s.__dict__ for s in signals], release=world.head(),
                        healthy_release=self._healthy_release(), trace_ids=[e.trace_id for e in recent])
         inc.note("open", "; ".join(s.describe() for s in signals), self.log)
+        # Did the runtime already step in on its own? Trust its shared state for whether it still
+        # is (it may have released a standby that didn't help); the trace spans name the parts.
+        engagement = first_aid.runtime_engagement(inc.release) or {}
+        if engagement.get("status") == "engaged":
+            healed = sorted(engagement.get("names") or [])
+            inc.first_aid = {"status": "auto", "what": ", ".join(healed) + " from the last known good release",
+                             "functions": healed, "base": engagement.get("good_release"),
+                             "applied_at": float(engagement.get("at") or time.time())}
+            inc.note("first_aid", f"the runtime healed requests by itself: running {', '.join(healed)} "
+                                  "from the last known good release", self.log)
+        elif engagement.get("status") == "not_code":
+            inc.note("first_aid", "the runtime tried the last known good and released it: the cause isn't in "
+                                  "the parts that changed", self.log)
         incidents.save(inc)
         return inc
 
@@ -153,6 +196,62 @@ class Medic:
         inc.phase = "escalated" if d["remedy"] == "escalate" else "decided"
         if inc.phase == "escalated":
             inc.note("escalated", "no safe automatic fix for this cause; paging a human", self.log)
+        elif d.get("cause") == "code_regression":
+            self._first_aid(inc)
+
+    def _first_aid(self, inc: Incident) -> None:
+        """Serve users with the culprit's healthy parts while the cure is made (medic/first_aid.py).
+
+        Best effort: whatever fails here (planning, the trial eval, publishing) is recorded and the
+        incident moves on to the cure. First aid must never hold the cure back."""
+        try:
+            self._attempt_first_aid(inc)
+        except Exception as exc:  # noqa: BLE001
+            inc.first_aid = {**inc.first_aid, "status": "error", "reason": f"{type(exc).__name__}: {exc}"}
+            inc.note("first_aid", f"first aid failed ({type(exc).__name__}); going on to the cure", self.log)
+
+    def _attempt_first_aid(self, inc: Incident) -> None:
+        p = first_aid.plan(paths.DEPLOY, inc.release, inc.healthy_release, inc.decision.get("culprit"))
+        if first_aid.empty(p):
+            reason = "; ".join(p["skipped"]) or "the culprit changed nothing the agent registered with the runtime"
+            inc.first_aid = {"status": "not_possible", "reason": reason, "registered": p["registered"]}
+            inc.note("first_aid", f"no first aid: {reason}; users wait for the cure", self.log)
+            return
+        body = first_aid.payload(inc.id, inc.release, p)
+        what = first_aid.describe(p)
+        # Prove it first: the known-answer eval on the broken release, with the bandage on.
+        trial = first_aid.write(paths.MEDIC_DIR / "control" / f"trial-{inc.id}.json", body)
+        try:
+            record = canary.evaluate(paths.DEPLOY, inc.release, first_aid=trial, tag="first-aid")
+        finally:
+            trial.unlink(missing_ok=True)
+        ok, detail = canary.answers_hold(record, self.watcher.state)
+        ok = ok and record.get("error_rate", 1.0) <= 0.25
+        before = next((r for r in reversed(self.watcher.state.get("canary") or [])
+                       if r.get("release") == inc.release[:12] and "pass_rate" in r), None)
+        if before is None:      # e.g. opened on trace errors: measure the broken release bare, for the comparison
+            before = canary.evaluate(paths.DEPLOY, inc.release, tag="first-aid-before")
+            before = before if "pass_rate" in before else None
+        inc.first_aid = {"what": what, "base": p["base"], "functions": sorted(p["functions"]),
+                         "values": sorted(p["values"]), "skipped": p["skipped"],
+                         "trial": {k: record.get(k) for k in ("pass_rate", "error_rate", "n", "tool_calls_per_run",
+                                                               "tokens_per_run", "error")},
+                         "before": {k: before.get(k) for k in ("pass_rate", "error_rate", "n", "tool_calls_per_run")}
+                         if before else None}
+        if not ok:
+            inc.first_aid.update(status="rejected", reason=detail)
+            inc.note("first_aid", f"first aid not applied: with {what}, {detail}", self.log)
+            return
+        first_aid.publish(body)
+        inc.first_aid.update(status="active", applied_at=time.time(), expires_at=body["expires_at"])
+        before_txt = f"{before['pass_rate']:.0%} -> " if before else ""
+        inc.note("first_aid", f"first aid live on {inc.release[:8]}: {what}; known-answer eval {before_txt}"
+                              f"{record['pass_rate']:.0%} with it; users are served while the cure is made", self.log)
+
+    def _remove_first_aid(self, inc: Incident, why: str) -> None:
+        if first_aid.clear(inc.id):
+            inc.first_aid.update(status="removed", removed_at=time.time())
+            inc.note("first_aid", f"first aid removed: {why}", self.log)
 
     def do_remedy(self, inc: Incident) -> None:
         record = remedy.attempt(inc, self.reader, self.log)
@@ -236,6 +335,9 @@ class Medic:
         if inc.deploy["deployed"]:
             inc.note("deployed", f"release {inc.deploy['release'][:8]} is live", self.log)
             inc.phase = "deployed"
+            # The bundle is bound to the broken release, so the cure already runs without it;
+            # removing it makes that explicit, and monitoring judges the cure on its own.
+            self._remove_first_aid(inc, "the cure is live")
         else:
             inc.note("escalated", inc.deploy["detail"], self.log)
             inc.phase = "escalated"

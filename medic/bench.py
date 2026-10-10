@@ -147,6 +147,8 @@ def drive(scenario: str, workdir: Path) -> dict:
         attempts=len(inc.remedy.get("attempts", [])), detect_s=round(detected - fault_at),
         resolve_s=round(closed - fault_at) if closed else None,
         fixer_tokens=fixer_tokens, fixer_cost_usd=fixer_cost,
+        first_aid=inc.first_aid.get("status"),
+        first_aid_s=round(inc.first_aid["applied_at"] - fault_at) if inc.first_aid.get("applied_at") else None,
         disagreements=inc.decision.get("disagreements", []), timeline=inc.timeline)
     return _score(result, spec, culprit_sha)
 

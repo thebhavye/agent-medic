@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from medic import contract, evidence, paths
+from medic import contract, evidence, first_aid, paths
 
 RECENT = 6          # traces per window
 MAX_NEW = 6         # traces read per poll: one window
@@ -137,7 +137,12 @@ class Watcher:
                          "dependency contract recorded")
             return [], current
         signals = compare(self.state["baseline"], current)
-        if not signals and len(current["releases"]) == 1 and self._answers_verified(current["releases"][0]):
+        # Under first aid a broken release looks healthy: its traces are the bandage's, not its own.
+        # Judge by the traces themselves (an expired bundle leaves aided traces behind), and by
+        # whether a bundle is live now (an aided trace may not show its span yet).
+        aided = any(e.first_aid for e in recent)
+        if (not signals and len(current["releases"]) == 1 and not aided and first_aid.active() is None
+                and self._answers_verified(current["releases"][0])):
             self.state["healthy_release"] = current["releases"][0]
             save_state(self.state)
         return signals, current

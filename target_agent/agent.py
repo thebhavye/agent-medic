@@ -6,6 +6,7 @@ import time
 
 import neatlogs
 
+import medic_runtime as medic
 from target_agent import llm
 from target_agent.tools import TOOL_HANDLERS, TOOL_SCHEMAS
 
@@ -35,16 +36,24 @@ TRACED_TOOLS = {name: _traced(name, handler) for name, handler in TOOL_HANDLERS.
 
 
 def execute_tool(name: str, args: dict) -> str:
-    return TRACED_TOOLS[name](args)
+    # Through Medic's runtime: breakers for a dead dependency, and a guard against loops.
+    return medic.guard_tool(name, args, lambda: TRACED_TOOLS[name](args))
 
 
 @neatlogs.span(kind="AGENT", name="research_agent")
 def run_agent(question: str, provider) -> dict:
+    with medic.request():           # one request: the loop guard's scope
+        return _answer(question, provider)
+
+
+def _answer(question: str, provider) -> dict:
     transcript = [{"role": "user", "content": question}]
     stats = {"turns": 0, "tool_calls": 0, "tool_errors": 0, "input_tokens": 0, "output_tokens": 0}
     started = time.monotonic()
 
     def finish(status: str, answer: str = "", error: str = "") -> dict:
+        if status != "ok":
+            medic.failed(error)     # an error, refusal or max_tokens is a failed request for the runtime too
         return {
             "status": status,
             "answer": answer,
@@ -56,7 +65,11 @@ def run_agent(question: str, provider) -> dict:
 
     while stats["turns"] < MAX_TURNS:
         stats["turns"] += 1
-        turn = provider.chat(MODEL, SYSTEM, transcript, TOOL_SCHEMAS, effort=EFFORT)
+        # The prompt and tool schemas are read through the runtime, so during an incident Medic
+        # can pin their last healthy versions; an unavailable model falls back.
+        turn = medic.call_model(lambda model: provider.chat(
+            model, medic.value("system_prompt", SYSTEM), transcript, medic.value("tool_schemas", TOOL_SCHEMAS),
+            effort=EFFORT), MODEL)
         stats["input_tokens"] += turn.input_tokens
         stats["output_tokens"] += turn.output_tokens
 
@@ -65,7 +78,7 @@ def run_agent(question: str, provider) -> dict:
         if turn.stop == "max_tokens":
             return finish("error", error="hit max_tokens")
         if not turn.tool_calls:
-            return finish("ok", answer=turn.text)
+            return finish("ok", answer=medic.answer(turn.text))   # a non-answer counts as a failed request
 
         transcript.append({"role": "assistant", "text": turn.text, "tool_calls": turn.tool_calls, "raw": turn.raw})
         for call in turn.tool_calls:
