@@ -188,6 +188,7 @@ def incident_view(inc: dict) -> dict:
                    "release": deploy.get("release"), "deployed": deploy.get("deployed"), "at": deploy.get("at")},
         "monitor": inc.get("monitor") or {},
         "first_aid": inc.get("first_aid") or {},
+        "neatlogs": inc.get("neatlogs") or {},
     }
 
 
@@ -302,6 +303,19 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, body, "application/json; charset=utf-8")
         else:
             self._send(404, b"not found", "text/plain; charset=utf-8")
+
+    def do_POST(self):
+        """neatlogs alert webhook. It only rings Medic's doorbell: Medic then reads the alert
+        from the authenticated API, so a forged or replayed delivery can't fake an incident."""
+        if self.path.split("?", 1)[0] != "/hooks/neatlogs":
+            self._send(404, b"not found", "text/plain; charset=utf-8")
+            return
+        length = min(int(self.headers.get("Content-Length") or 0), 1 << 20)
+        self.rfile.read(length)                    # drain the body; its content is not trusted
+        bell = Path(self.medic_dir) / "neatlogs" / "doorbell"
+        bell.parent.mkdir(parents=True, exist_ok=True)
+        bell.write_text(str(time.time()), encoding="utf-8")
+        self._send(204, b"", "text/plain; charset=utf-8")
 
     def log_message(self, *args):
         pass
