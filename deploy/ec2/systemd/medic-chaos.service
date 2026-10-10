@@ -1,0 +1,14 @@
+[Unit]
+Description=Agent Medic chaos scenario (break something on a schedule)
+After=medic-kb.service medic-world-init.service
+Wants=medic-kb.service
+
+[Service]
+Type=oneshot
+User=medic
+WorkingDirectory=/opt/agent-medic
+EnvironmentFile=/opt/agent-medic/.env
+ExecStart=/opt/agent-medic/deploy/ec2/chaos.sh
+
+[Install]
+WantedBy=multi-user.target

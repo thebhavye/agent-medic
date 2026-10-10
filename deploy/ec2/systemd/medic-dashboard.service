@@ -1,0 +1,19 @@
+[Unit]
+Description=Agent Medic live dashboard
+After=network.target
+# Nothing depends on this unit, so it can never break the other services.
+# The ExecCondition below skips it cleanly if the dashboard module is absent.
+
+[Service]
+Restart=always
+RestartSec=5
+User=medic
+WorkingDirectory=/opt/agent-medic
+EnvironmentFile=/opt/agent-medic/.env
+ExecCondition=/opt/agent-medic/.venv/bin/python -c "import medic.dashboard"
+# --host 0.0.0.0: the dashboard listens on localhost only by default; on EC2 it
+# must accept the visitors the security group lets in on 8790.
+ExecStart=/opt/agent-medic/.venv/bin/python -m medic.dashboard --port 8790 --host 0.0.0.0
+
+[Install]
+WantedBy=multi-user.target

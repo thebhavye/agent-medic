@@ -1,0 +1,18 @@
+[Unit]
+Description=Agent Medic watcher (detect, diagnose, fix, verify)
+After=medic-traffic.service medic-kb.service
+Wants=medic-traffic.service
+
+[Service]
+Restart=always
+RestartSec=10
+User=medic
+WorkingDirectory=/opt/agent-medic
+EnvironmentFile=/opt/agent-medic/.env
+Environment=LLM_PROVIDER=ollama_cloud
+Environment=FIXER_PROVIDER=ollama_cloud
+Environment=MEDIC_CANARY_INTERVAL_S=600
+ExecStart=/opt/agent-medic/.venv/bin/python -m medic.cli watch --interval 20
+
+[Install]
+WantedBy=multi-user.target

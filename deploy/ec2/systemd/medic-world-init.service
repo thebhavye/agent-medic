@@ -1,0 +1,16 @@
+[Unit]
+Description=Agent Medic demo world init (one-shot)
+ConditionPathExists=!/opt/agent-medic/.medic/deploy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=medic
+WorkingDirectory=/opt/agent-medic
+EnvironmentFile=/opt/agent-medic/.env
+ExecStart=/opt/agent-medic/.venv/bin/python -m medic.cli world init
+
+[Install]
+WantedBy=multi-user.target
