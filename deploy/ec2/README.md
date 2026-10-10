@@ -41,7 +41,7 @@ chmod 400 agent-medic-key.pem
 ssh -i agent-medic-key.pem ubuntu@$EC2_IP
 ```
 
-Copy the kit and run setup (from the laptop, repo root):
+Copy the kit and run setup (from the laptop, repo root). With a token:
 
 ```bash
 scp -i agent-medic-key.pem deploy/ec2/setup.sh ubuntu@$EC2_IP:/tmp/setup.sh
@@ -49,9 +49,46 @@ ssh -i agent-medic-key.pem ubuntu@$EC2_IP \
   'sudo GITHUB_TOKEN=<fine-grained-token-with-contents-read> bash /tmp/setup.sh'
 ```
 
-No token? Add an ssh deploy key to the repo (Settings -> Deploy keys) instead:
-`ssh -i agent-medic-key.pem ubuntu@$EC2_IP 'sudo bash /tmp/setup.sh'`.
-The token is never printed or stored; it lives only in that one command line.
+The token is used once through a temporary credential helper that is deleted
+immediately after cloning; it never appears in the clone URL, `.git/config`,
+or logs. `origin` stays the plain public URL.
+
+### 2b. Without a token: SSH deploy key (end-to-end)
+
+The EC2 login PEM (`agent-medic-key.pem`) only logs you into the instance —
+GitHub knows nothing about it, so it cannot clone the private repo. Create a
+separate deploy key for repository access (on the laptop):
+
+```bash
+ssh-keygen -t ed25519 -f agent-medic-deploy -N "" -C "agent-medic-demo"
+# add agent-medic-deploy.pub to the repo: GitHub -> thebhavye/agent-medic ->
+# Settings -> Deploy keys -> Add deploy key (read access is enough)
+```
+
+Install the private half on the instance where `setup.sh` expects it
+(`/root/.ssh/id_agent_medic`, `chmod 600`), plus GitHub's verified host key.
+Get the fingerprints from GitHub's docs ("SSH key fingerprints") and confirm
+each line below matches before trusting it:
+
+```bash
+scp -i agent-medic-key.pem deploy/ec2/setup.sh agent-medic-deploy ubuntu@$EC2_IP:/tmp/
+ssh -i agent-medic-key.pem ubuntu@$EC2_IP
+sudo install -m 600 -o root -g root /tmp/agent-medic-deploy /root/.ssh/id_agent_medic
+sudo mkdir -p /root/.ssh && sudo chmod 700 /root/.ssh
+ssh-keyscan -t rsa,ecdsa,ed25519 github.com > /tmp/gh.pub
+ssh-keygen -lf /tmp/gh.pub   # compare against the fingerprints in GitHub's docs
+cat /tmp/gh.pub | sudo tee -a /root/.ssh/known_hosts > /dev/null
+sudo ssh -i /root/.ssh/id_agent_medic -o BatchMode=yes -T git@github.com
+# expect "Hi thebhavye/...! You've successfully authenticated" (GitHub exits 1
+# alongside that message; the message is what counts)
+sudo bash /tmp/setup.sh
+```
+
+`setup.sh` without `GITHUB_TOKEN` clones with exactly that key
+(`ssh -i /root/.ssh/id_agent_medic -o IdentitiesOnly=yes -o BatchMode=yes`)
+and fails with an actionable error if the key is missing or rejected —
+it never probes with `ssh -T` status codes and never continues past a
+failed clone.
 
 ## 3. Copy `.env` (never commit it)
 
@@ -74,12 +111,30 @@ sudo /opt/agent-medic/deploy/ec2/status.sh
 
 - Dashboard: `http://<EC2_IP>:8790` (give traffic + watch ~2 minutes first).
 - Logs: `journalctl -u medic-watch -f`, or any unit in `status.sh`.
-- Chaos log: `/opt/agent-medic/.medic/logs/chaos.log` (first break ~30 min
-  after boot, then every 2 hours; `OnUnitActiveSec=2h` in
-  `systemd/medic-chaos.timer`).
+- Chaos log: `/opt/agent-medic/.medic/logs/chaos.log`. `setup.sh` already
+  started the timer (`systemctl enable --now medic-chaos.timer`): first break
+  ~30 min after boot, then every 2 hours (`OnBootSec=30min`,
+  `OnUnitActiveSec=2h` in `systemd/medic-chaos.timer`). Confirm with
+  `systemctl list-timers medic-chaos.timer`. A failed chaos run exits nonzero,
+  so it shows up in `journalctl -u medic-chaos` — a merely active timer does
+  not mean chaos has run; check the log.
 
 If `medic-dashboard` shows "skipped" the dashboard module is missing on this
 branch — the other services are unaffected by design.
+
+## Kit self-check (laptop, no AWS needed)
+
+```bash
+bash deploy/ec2/tests/test_kit.sh
+```
+
+It syntax-checks the scripts, verifies no credentials are embedded in Git
+URLs, clones a throwaway local repo through the token helper to prove the
+secret never lands in `.git/config`, exercises all four chaos/reset
+failure combinations with a mocked CLI, and cross-checks service/timer
+names across setup, README, and the unit files. It mocks `systemctl` and
+the Medic CLI; first boot on EC2 still needs a smoke test (`status.sh`,
+dashboard loads, one chaos entry in the log).
 
 ## 5. Stop to save credits
 
