@@ -4,6 +4,8 @@ import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
 
+import pytest
+
 from medic import dashboard
 
 
@@ -92,6 +94,56 @@ def test_traces_use_the_watcher_failure_rule_and_live_rollout_counts_its_traces(
     assert traces[0]["at"] < traces[-1]["at"]
     assert state["rollout"]["canary_traces"] == 2 and state["rollout"]["canary_window"]["failure_rate"] == 0.0
     assert state["deploy"] is None                      # no deployment repo in this fixture
+
+
+def test_health_numbers_use_the_traces_medic_decides_on(tmp_path):
+    from medic.watcher import RECENT
+    (tmp_path / "incidents").mkdir()
+    # Stored (arrival) order differs from start order: the newest-stored trace started first and
+    # failed. Medic's window is the last RECENT stored traces, so it must count that failure.
+    ok = [{"trace_id": f"ok{i}", "started_at": f"2026-10-10T11:{10 + i}:00.000Z", "release": "f" * 12,
+           "status": "OK", "answer": "Narvik"} for i in range(RECENT + 2)]
+    late = {"trace_id": "late", "started_at": "2026-10-10T10:00:00.000Z", "release": "f" * 12,
+            "status": "ERROR", "answer": ""}
+    (tmp_path / "state.json").write_text(json.dumps({"traces": ok + [late]}), encoding="utf-8")
+    (tmp_path / "rollout.json").write_text(json.dumps({"candidate": "f" * 40, "share": 0.5}), encoding="utf-8")
+    state = dashboard.build_state(tmp_path)
+    assert state["production"]["current"]["failure_rate"] == pytest.approx(1 / RECENT)
+    assert state["rollout"]["canary_traces"] == RECENT + 3
+    assert state["rollout"]["canary_window"]["n"] == RECENT          # rollout.judge() looks at the last RECENT
+    assert state["rollout"]["canary_window"]["failure_rate"] == pytest.approx(1 / RECENT)
+    assert state["production"]["traces"][0]["id"] == "late"          # the chart still sorts by start time
+
+
+def run_js(expr, *functions, prelude=""):
+    """Evaluate one expression in node against the page's own helper functions; skip without node."""
+    import re
+    import shutil
+    import subprocess
+    if not shutil.which("node"):
+        pytest.skip("node not installed")
+    page = dashboard.PAGE.read_text(encoding="utf-8")
+    def source(name):           # a one-line function, else one that closes with "}" on its own line
+        one = re.search(rf"^function {name}\([^\n]*\}}\n", page, re.M)
+        return (one or re.search(rf"^function {name}\(.*?\n\}}\n", page, re.M | re.S)).group(0)
+    code = "".join(source(name) for name in functions)
+    out = subprocess.run(["node", "-e", prelude + code + f"console.log(JSON.stringify({expr}))"],
+                         capture_output=True, text=True, check=True)
+    return json.loads(out.stdout)
+
+
+def test_median_averages_the_middle_pair():
+    assert run_js("[median([10, 100]), median([100, 10, 55]), median([]), median([null, 4])]",
+                  "median") == [55, 55, None, 4]
+
+
+@pytest.mark.parametrize("deploy,status", [
+    ("{sha: 'f'.repeat(40)}", "it is the live release"),
+    ("{sha: 'a'.repeat(40)}", "since replaced by aaaaaaaa"),
+    ("null", "current live release unknown"),            # no deployment repo: don't guess
+])
+def test_live_status_only_claims_what_the_deployment_shows(deploy, status):
+    assert run_js("liveStatus('f'.repeat(40))", "short", "liveStatus", prelude=f"var DATA = {{deploy: {deploy}}};") == status
 
 
 def test_empty_dir_does_not_crash(tmp_path):

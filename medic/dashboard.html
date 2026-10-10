@@ -260,6 +260,12 @@ function S(tag, attrs){
     el.appendChild(typeof arguments[i] === "object" ? arguments[i] : document.createTextNode(String(arguments[i])));
   return el;
 }
+function median(values){
+  var v = values.filter(function(x){ return x != null && !isNaN(x); }).sort(function(a, b){ return a - b; });
+  if (!v.length) return null;
+  var mid = Math.floor(v.length / 2);
+  return v.length % 2 ? v[mid] : (v[mid - 1] + v[mid]) / 2;     // even count: mean of the two middle values
+}
 function pct(x, d){ return x == null || isNaN(x) ? "—" : (x * 100).toFixed(d || 0) + "%"; }
 function dur(s){
   if (s == null || isNaN(s) || s < 0) return "—";
@@ -346,7 +352,7 @@ function renderLive(root){
   var base = prod.baseline || {}, cur = prod.current || {};
   var lastCan = (prod.canary_runs || []).slice(-1)[0];
   var healed = (DATA.incidents || []).filter(function(i){ return i.phase === "resolved" && i.ended_at; });
-  var mttr = healed.length ? healed.map(function(i){ return i.ended_at - i.opened_at; }).sort(function(a, b){ return a - b; })[Math.floor(healed.length / 2)] : null;
+  var mttr = median(healed.map(function(i){ return i.ended_at - i.opened_at; }));
 
   root.appendChild(h("div", {class:"hero"},
     h("div", null,
@@ -620,6 +626,14 @@ function repairStage(inc){
         : "No candidate has been verified yet.", body);
 }
 
+// Is a promoted release still the one serving? Only say "replaced" when a different
+// deployed release is known; without deployment data the current state is unknown.
+function liveStatus(release){
+  var live = DATA.deploy && DATA.deploy.sha, mine = String(release || "").slice(0, 12);
+  if (!live || !mine) return "current live release unknown";
+  return live.indexOf(mine) === 0 ? "it is the live release" : "since replaced by " + short(live);
+}
+
 function canaryStage(inc){
   var c = inc.canary || {}, ro = c.rollout || (DATA.rollout && DATA.rollout.incident === inc.id ? DATA.rollout : null);
   var v = c.verdict, st = stateOf(inc, "canary", "deployed");
@@ -647,7 +661,9 @@ function canaryStage(inc){
   if (v && v.answers) body.push(h("div", {class:"sig", style:"margin-top:8px"}, h("span", {class:"muted"}, "Known-answer eval on the canary release:"), h("b", null, v.answers)));
   var rolled = (inc.timeline || []).filter(function(e){ return /\brolled back\b|\brolling back\b/i.test(e.msg); });
   rolled.forEach(function(e){ body.push(h("div", {class:"outcome bad"}, h("span", {class:"ic"}, "↺"), h("span", null, e.msg))); });
-  if (c.deployed && !live) body.push(h("div", {class:"outcome ok"}, h("span", {class:"ic"}, "✓"), h("span", null, "Promoted: ", sha(c.release), " is the live release", v && v.detail ? h("span", {class:"muted", style:"font-weight:400"}, " · " + v.detail) : null)));
+  if (c.deployed && !live) body.push(h("div", {class:"outcome ok"}, h("span", {class:"ic"}, "✓"),
+    h("span", null, "Promoted ", sha(c.release), " at " + day(c.at) + " · " + liveStatus(c.release),
+      v && v.detail ? h("span", {class:"muted", style:"font-weight:400"}, " · " + v.detail) : null)));
   else if (live) body.push(h("div", {class:"outcome warn"}, h("span", {class:"ic"}, "…"), h("span", null, "Collecting canary traces: " + live.canary_traces + " so far")));
   return stage(4, st, "Canary", took(inc, "canary", "deployed"),
     "Verification uses the eval set; production is bigger. So the fix serves part of real traffic first, and Medic compares it with the healthy baseline before promoting it, or rolls it back.", body);
@@ -685,7 +701,7 @@ function renderBench(root){
   var passed = b.filter(function(r){ return r.passed; }).length;
   var withCulprit = b.filter(function(r){ return r.culprit_expected; });
   var found = withCulprit.filter(function(r){ return r.culprit_found && r.culprit_found === r.culprit_expected; }).length;
-  function med(k){ var v = b.map(function(r){ return r[k]; }).filter(function(x){ return x != null; }).sort(function(a, c){ return a - c; }); return v.length ? v[Math.floor(v.length / 2)] : null; }
+  function med(k){ return median(b.map(function(r){ return r[k]; })); }
   root.appendChild(h("div", {class:"hero"},
     h("div", null, h("h1", null, "Benchmark"), h("p", {class:"sub"}, "Each scenario breaks a fresh production world in a known way; Medic has to find the cause and heal it on its own.")),
     h("div", {class:"kpis"}, kpi(passed + "/" + b.length, "scenarios passed"), kpi(withCulprit.length ? found + "/" + withCulprit.length : "—", "culprit commit found"),
