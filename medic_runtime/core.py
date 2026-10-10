@@ -243,12 +243,12 @@ def _changed_since_good(standby: dict) -> list[str]:
     return sorted(changed)
 
 
-def _record_outcome(failed: bool, aided: bool = False) -> None:
+def _record_outcome(failed: bool, started_engaged: bool = False) -> None:
     """Judge the last few requests; engage the standby, or give it up if it didn't help.
 
-    A request counts for the side it actually ran on: `aided` means it used the standby. A
-    request that started on the live code and finished after the engagement is live-code
-    evidence, not evidence against the standby (requests run in parallel)."""
+    A request counts for the side it started on, so one that fails before it reaches a
+    replaced part still counts against the standby. A request that crossed the switch (started
+    on one side, finished on the other; requests run in parallel) is evidence for neither."""
     standby = _standby()
     if standby is None:
         return
@@ -258,8 +258,10 @@ def _record_outcome(failed: bool, aided: bool = False) -> None:
     # deciding together would each rewrite the state from the same stale read.
     with _state_lock:
         engaged = _engagement()
+        if bool(engaged) != started_engaged:
+            return                      # crossed the switch
         with _lock:
-            _outcomes.append((failed, aided))
+            _outcomes.append((failed, started_engaged))
             del _outcomes[:-TRIP_WINDOW * 4]
             window = [f for f, a in _outcomes if a == bool(engaged)][-TRIP_WINDOW:]
         state = _read_state()
@@ -304,9 +306,6 @@ def _patch(kind: str, name: str):
     if engaged and name in engaged.get("names", []):
         standby = (_standby() or {}).get(kind) or {}
         if name in standby:
-            scope = _request.get()
-            if scope is not None:
-                scope["aided"] = True   # this request ran on the last known good
             return "auto", standby[name]
     return None, None
 
@@ -403,7 +402,8 @@ def value(name: str, default):
 def request():
     """One agent request: the scope for the loop guard, for reporting each fix once, and the
     unit armed mode judges (did this request fail the way code makes requests fail?)."""
-    scope = {"calls": {}, "reported": set(), "failed": False, "tool_calls": 0, "aided": False}
+    scope = {"calls": {}, "reported": set(), "failed": False, "tool_calls": 0,
+             "engaged": _engagement() is not None if _standby() else False}
     token = _request.set(scope)
     try:
         yield
@@ -417,7 +417,7 @@ def request():
             budget = ((_standby() or {}).get("limits") or {}).get("tool_calls_per_request")
             if budget and scope["tool_calls"] > budget:
                 scope["failed"] = True
-            _record_outcome(scope["failed"], scope["aided"])
+            _record_outcome(scope["failed"], scope["engaged"])
         except Exception:  # noqa: BLE001 - judging must never break the agent
             pass
 

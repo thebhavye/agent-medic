@@ -27,6 +27,24 @@ def test_parallel_failing_requests_leave_readable_engaged_state(armed):  # noqa:
     assert not list(tmp.glob("state.json.*.tmp"))                       # no leftovers
 
 
+def test_failures_before_the_replaced_part_still_release_the_standby(armed):  # noqa: F811
+    publish, tmp = armed
+    publish()
+    for i in range(core.TRIP_FAILURES):
+        run_request({"query": f"x{i}"})                                 # engages the healthy lookup()
+
+    def broken_handler():
+        raise KeyError("doc_id")                                        # fails before lookup() runs
+    for _ in range(core.TRIP_WINDOW):
+        with medic.request():
+            try:
+                medic.guard_tool("search", {}, broken_handler)
+            except KeyError:
+                pass
+    state = json.loads((tmp / "state.json").read_text())
+    assert state["b" * 12]["status"] == "not_code"                      # released, not left on
+
+
 def test_targeted_bundle_replaces_the_automatic_engagement(armed, monkeypatch):  # noqa: F811
     publish, tmp = armed
     publish(functions={"lookup": {"source": "def lookup(args):\n    return args['query']\n"}},
