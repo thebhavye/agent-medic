@@ -21,6 +21,7 @@ from pathlib import Path
 
 from medic import paths
 from medic.evidence import NON_ANSWER
+from medic.watcher import RECENT              # the window Medic decides health on
 
 PAGE = Path(__file__).with_name("dashboard.html")
 TRACE_LIMIT = 120
@@ -153,7 +154,13 @@ def incident_view(inc: dict) -> dict:
     timeline = [e for e in inc.get("timeline") or [] if isinstance(e, dict)]
     first = {}
     for e in timeline:
-        first.setdefault({"remedy": "remedied"}.get(e.get("phase"), e.get("phase")), e.get("t"))
+        phase = e.get("phase")
+        if phase == "remedy":
+            # Rejected attempts log a remedy event too; the repair is done only once one is accepted.
+            if not re.search(r": accepted\b", e.get("msg", "")):
+                continue
+            phase = "remedied"
+        first.setdefault(phase, e.get("t"))
     resolved_at = first.get("resolved") or first.get("escalated")
     deploy = inc.get("deploy") or {}
     triage = inc.get("triage") or {}
@@ -263,7 +270,7 @@ def build_state(medic_dir: Path) -> dict:
         "deploy": {"sha": head, "subject": (commits.get(head) or {}).get("subject", ""),
                    "at": (commits.get(head) or {}).get("at")} if head else None,
         "releases": release_info, "rollout": rollout,
-        "production": {"traces": traces, "baseline": state.get("baseline"), "current": window(traces[-12:]),
+        "production": {"traces": traces, "baseline": state.get("baseline"), "current": window(traces[-RECENT:]),
                        "total": len(state.get("traces") or []), "canary_runs": canary_runs,
                        "canary_baseline": state.get("canary_baseline"), "healthy_release": state.get("healthy_release")},
         "incidents": incidents, "bench": bench, "external": external,

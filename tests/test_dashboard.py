@@ -34,7 +34,7 @@ def incident(**over):
         "deploy": {"canary": {"candidate": "f" * 40, "stable": "b" * 40, "share": 0.5}, "deployed": True, "release": "f" * 40,
                    "canary_verdict": {"verdict": "healthy", "window": {"n": 6, "failure_rate": 0.0}, "detail": "6 canary traces"}},
         "timeline": [{"t": 1000.0, "phase": "open", "msg": "opened"}, {"t": 1076.0, "phase": "triaged", "msg": "t"},
-                     {"t": 1186.0, "phase": "decided", "msg": "d"}, {"t": 1219.0, "phase": "remedy", "msg": "r"},
+                     {"t": 1186.0, "phase": "decided", "msg": "d"}, {"t": 1219.0, "phase": "remedy", "msg": "remedy attempt 1: accepted: verified"},
                      {"t": 1221.0, "phase": "canary", "msg": "candidate serves 50%; canary traces decide promote or roll back"},
                      {"t": 1456.0, "phase": "deployed", "msg": "live"}, {"t": 1594.0, "phase": "resolved", "msg": "healed"}],
     }
@@ -122,3 +122,38 @@ def test_http_serves_page_and_state(tmp_path):
 def test_page_never_injects_data_as_html():
     page = dashboard.PAGE.read_text(encoding="utf-8")
     assert "innerHTML" not in page and "insertAdjacentHTML" not in page
+
+
+def test_rejected_attempt_does_not_complete_the_repair(tmp_path):
+    rejected = incident(id="inc3", phase="decided", deploy={},
+                        timeline=[{"t": 1000.0, "phase": "open", "msg": "o"}, {"t": 1186.0, "phase": "decided", "msg": "d"},
+                                  {"t": 1219.0, "phase": "remedy", "msg": "remedy attempt 1: rejected: tests fail"}])
+    inc = dashboard.build_state(medic_dir(tmp_path, [rejected]))["incidents"][0]
+    assert "remedied" not in [p["phase"] for p in inc["phases"]]
+
+
+def test_current_window_is_the_one_medic_decides_on(tmp_path):
+    from medic.watcher import RECENT
+    assert dashboard.build_state(medic_dir(tmp_path))["production"]["current"]["n"] == min(RECENT, 5)
+
+
+def test_page_has_no_control_characters_and_matches_real_rollback_messages():
+    page = dashboard.PAGE.read_text(encoding="utf-8")
+    assert not [ch for ch in page if ord(ch) < 32 and ch not in (chr(9), chr(10), chr(13))]
+    assert r"/\brolled back\b|\brolling back\b/i" in page
+
+
+def test_wheel_ships_the_page(tmp_path):
+    import subprocess
+    import sys
+    import zipfile
+    import shutil
+    root = dashboard.PAGE.parent.parent
+    leftover = not (root / "build").exists()
+    # Build through setuptools' backend directly, in a subprocess so build files stay out of this one.
+    subprocess.run([sys.executable, "-c", f"from setuptools import build_meta; build_meta.build_wheel({str(tmp_path)!r})"],
+                   cwd=root, check=True, capture_output=True)
+    if leftover:
+        shutil.rmtree(root / "build", ignore_errors=True)
+    wheel = next(tmp_path.glob("agent_medic-*.whl"))
+    assert "medic/dashboard.html" in zipfile.ZipFile(wheel).namelist()

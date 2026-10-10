@@ -368,7 +368,12 @@ function renderLive(root){
     "Medic is watching production traces. Break something with ", h("code", null, "agent-medic world chaos"), " or a bad release.")));
 }
 function silentNote(inc){
-  if (!inc || !(inc.signals || []).some(function(s){ return /canary|pass/.test(s.metric || ""); })) return null;
+  // Only when the known-answer eval was the sole signal and no trace on the broken release failed.
+  var sigs = inc ? inc.signals || [] : [];
+  if (!sigs.length || !sigs.every(function(s){ return /canary|pass/.test(s.metric || ""); })) return null;
+  var broken = String(inc.release || "").slice(0, 12);
+  var onBroken = ((DATA.production || {}).traces || []).filter(function(t){ return t.release === broken; });
+  if (!onBroken.length || onBroken.some(function(t){ return t.failed || t.tool_errors; })) return null;
   return h("p", {class:"muted", style:"font-size:12.5px;margin:10px 0 0;padding:8px 12px;border-radius:8px;background:var(--sunk)"},
     h("b", {style:"color:var(--ink)"}, "A silent failure. "), "Every trace on the broken release finished without an error, but the answers were wrong. "
     + "Trace metrics alone would have missed it; Medic's known-answer eval caught it.");
@@ -622,9 +627,11 @@ function canaryStage(inc){
     return stage(4, phaseT(inc, "remedied") && inc.phase !== "escalated" ? "now" : "pending", "Canary", null,
       inc.phase === "escalated" ? "No fix to roll out." : "A verified fix first serves a share of real production traffic.", null);
   }
-  var share = ro ? ro.share : null;
   var live = DATA.rollout && DATA.rollout.incident === inc.id ? DATA.rollout : null;
-  var w = (v && v.window) || (live && live.canary_window) || {};
+  // A rollout in progress is a new candidate: an earlier verdict belongs to the one it replaced.
+  if (live) { ro = live; v = null; }
+  var share = ro ? ro.share : null;
+  var w = (live ? live.canary_window : v && v.window) || {};
   var base = (DATA.production || {}).baseline || {};
   var body = [];
   if (share != null) body.push(h("div", {class:"split"},
@@ -638,9 +645,9 @@ function canaryStage(inc){
       h("div", {class:"sig"}, h("span", {class:"m"}, "failure rate"), h("b", null, pct(base.failure_rate))),
       h("div", {class:"sig"}, h("span", {class:"m"}, "tool error rate"), h("b", null, pct(base.tool_error_rate))))));
   if (v && v.answers) body.push(h("div", {class:"sig", style:"margin-top:8px"}, h("span", {class:"muted"}, "Known-answer eval on the canary release:"), h("b", null, v.answers)));
-  var rolled = (inc.timeline || []).filter(function(e){ return /rolled back|rolling back/i.test(e.msg); });
+  var rolled = (inc.timeline || []).filter(function(e){ return /\brolled back\b|\brolling back\b/i.test(e.msg); });
   rolled.forEach(function(e){ body.push(h("div", {class:"outcome bad"}, h("span", {class:"ic"}, "↺"), h("span", null, e.msg))); });
-  if (c.deployed) body.push(h("div", {class:"outcome ok"}, h("span", {class:"ic"}, "✓"), h("span", null, "Promoted: ", sha(c.release), " is the live release", v && v.detail ? h("span", {class:"muted", style:"font-weight:400"}, " · " + v.detail) : null)));
+  if (c.deployed && !live) body.push(h("div", {class:"outcome ok"}, h("span", {class:"ic"}, "✓"), h("span", null, "Promoted: ", sha(c.release), " is the live release", v && v.detail ? h("span", {class:"muted", style:"font-weight:400"}, " · " + v.detail) : null)));
   else if (live) body.push(h("div", {class:"outcome warn"}, h("span", {class:"ic"}, "…"), h("span", null, "Collecting canary traces: " + live.canary_traces + " so far")));
   return stage(4, st, "Canary", took(inc, "canary", "deployed"),
     "Verification uses the eval set; production is bigger. So the fix serves part of real traffic first, and Medic compares it with the healthy baseline before promoting it, or rolls it back.", body);
@@ -743,7 +750,13 @@ function render(){
 function tick(){
   fetch("/api/state", {cache:"no-store"}).then(function(r){ return r.text(); }).then(function(text){
     FETCHED = Date.now();
-    if (text !== LAST) { LAST = text; DATA = JSON.parse(text); render(); }
+    // generated_at changes on every request; rebuild the page only when the data itself changed.
+    var next = JSON.parse(text), at = next.generated_at;
+    delete next.generated_at;
+    var key = JSON.stringify(next);
+    next.generated_at = at;
+    if (key !== LAST) { LAST = key; DATA = next; render(); }
+    else DATA.generated_at = at;
   }).catch(function(){}).finally(function(){ setTimeout(tick, 3000); });
 }
 setInterval(function(){
