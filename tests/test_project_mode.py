@@ -342,3 +342,31 @@ def test_tool_work_before_and_after_handing_back_async_work_counts_toward_the_ca
                           timeout=300)
     results = json.loads(out.read_text())["cases"]
     assert [(r["tool_calls"], r["tool_errors"]) for r in results] == [(2, 1)] * 4, proc.stderr[-500:]
+
+
+CANCELLING_BOT = (
+    "import asyncio\n\n\n"
+    "async def _work(question):\n"
+    "    if 'cancel' in question:\n"
+    "        inner = asyncio.ensure_future(asyncio.sleep(10))\n"
+    "        inner.cancel()\n"
+    "        await inner\n"                                                  # raises CancelledError in here
+    "    return 'The pilot plant is in Narvik.'\n\n\n"
+    "async def answer_async(question):\n    return await _work(question)\n\n\n"
+    "def answer_sync(question):\n    return _work(question)\n")
+
+
+@pytest.mark.parametrize("entry", ["cbot:answer_async", "cbot:answer_sync"])
+def test_a_cancelled_answer_fails_its_case_without_stalling_the_run(tmp_path, entry):
+    (tmp_path / "cbot.py").write_text(CANCELLING_BOT)
+    cases = tmp_path / "cases.jsonl"
+    cases.write_text("".join(json.dumps({"id": q, "question": q, "expect": [["Narvik"]]}) + "\n"
+                             for q in ("where", "cancel", "where again")))
+    out = tmp_path / "out.json"
+    proc = subprocess.run([sys.executable, "-m", "medic.runner", "--entry", entry, "--cases", str(cases),
+                           "--out", str(out), "--session", "s", "--workers", "2"], cwd=tmp_path,
+                          capture_output=True, text=True, env={**__import__("os").environ, "NEATLOGS_API_KEY": ""},
+                          timeout=120)                                    # a hang fails here, not forever
+    results = {r["id"]: r for r in json.loads(out.read_text())["cases"]}
+    assert results["where"]["passed"] and results["where again"]["passed"], proc.stderr[-500:]
+    assert results["cancel"]["status"] == "error" and "cancelled" in results["cancel"]["error"]

@@ -44,6 +44,22 @@ def contains(text: str, fact: str) -> bool:
     return re.search(r"(?<!\w)" + re.escape(fact.strip()) + r"(?!\w)", text) is not None
 
 
+class Cancelled(RuntimeError):
+    """The agent's own async work was cancelled: a failed case, not a stopped evaluation."""
+
+
+async def awaited(awaitable):
+    """Await the agent's work. A CancelledError that comes from inside it (it awaited a task that
+    was cancelled) is the case failing; only a cancellation of this run itself still propagates."""
+    try:
+        return await awaitable
+    except asyncio.CancelledError:
+        task = asyncio.current_task()
+        if task is not None and getattr(task, "cancelling", lambda: 0)():
+            raise
+        raise Cancelled("the answer's async work was cancelled") from None
+
+
 def load_entry(spec: str):
     module, _, name = spec.partition(":")
     if not module or not name:
@@ -132,12 +148,19 @@ def main(argv=None) -> int:
         loop, done = shared_loop(), concurrent.futures.Future()
 
         async def settle():
-            return await awaitable
+            return await awaited(awaitable)
+
+        def finish(t: asyncio.Task):
+            if t.cancelled():            # never leave the worker waiting on a cancelled answer
+                done.set_exception(Cancelled("the answer's async work was cancelled"))
+            elif t.exception() is not None:
+                done.set_exception(t.exception())
+            else:
+                done.set_result(t.result())
 
         def start():
             task = ctx.run(loop.create_task, settle())       # the task runs in a copy of ctx
-            task.add_done_callback(lambda t: done.set_exception(t.exception()) if t.exception()
-                                   else done.set_result(t.result()))
+            task.add_done_callback(finish)
         loop.call_soon_threadsafe(start)
         return done.result()
 
@@ -153,7 +176,7 @@ def main(argv=None) -> int:
                     out, exc = None, None
                     with contextlib.suppress(Exception), medic_runtime.request():
                         try:
-                            out = await entry(case["question"])
+                            out = await awaited(entry(case["question"]))
                         except Exception as e:  # noqa: BLE001
                             exc = e
                             raise
