@@ -99,7 +99,14 @@ def main(argv=None) -> int:
     # Medic's own eval runs log under their own workflow, so they never mix with the app's
     # production traffic in neatlogs (dashboards, analytics, search).
     workflow = args.workflow if args.workflow.endswith(CHECKS_SUFFIX) else args.workflow + CHECKS_SUFFIX
-    neatlogs.init(workflow_name=workflow, tags=["agent-medic", *args.tag])
+    # Name the model libraries the app uses: without instrumentations neatlogs doesn't record
+    # the app's model calls, so the eval's tokens and step-level evidence would be missing.
+    from pathlib import Path
+
+    from medic import tracing
+    instrumentations = tracing.detect(Path.cwd())
+    neatlogs.init(workflow_name=workflow, tags=["agent-medic", *args.tag],
+                  **({"instrumentations": instrumentations} if instrumentations else {}))
     entry = load_entry(args.entry)          # imported after init, so its model clients are traced
     import medic_runtime
 

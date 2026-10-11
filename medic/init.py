@@ -259,8 +259,18 @@ NEATLOGS_SNIPPET = '''
 if not os.environ.get("MEDIC_RUNNER"):          # Medic's own runs initialize neatlogs themselves
     neatlogs.init(workflow_name="{workflow}",
                   tags=["env:" + os.environ.get("MEDIC_ENV", "prod"),
-                        "release:" + os.environ.get("GIT_SHA", "dev")[:12]])
+                        "release:" + os.environ.get("GIT_SHA", "dev")[:12]]{instrumentations})
 '''
+
+
+def _instrumentations_arg(root: Path) -> str:
+    """`, instrumentations=[...]` for the model and vector-store libraries the app imports: without
+    it neatlogs doesn't record the app's model calls (no LLM spans, no tokens)."""
+    from medic import tracing
+    names = tracing.detect(root, check_installed=False)
+    if not names:
+        return ""
+    return ",\n                  instrumentations=[" + ", ".join(f'"{n}"' for n in names) + "]"
 
 
 def build_edits(plan: Plan, workflow: str) -> dict[str, str]:
@@ -300,7 +310,8 @@ def build_edits(plan: Plan, workflow: str) -> dict[str, str]:
         header = [imp for imp in ("import medic_runtime as medic",) if imp not in present]
         if rel == plan.entrypoint.file and not plan.has_neatlogs_init:
             header += [imp for imp in ("import neatlogs", "import os") if imp not in present]
-            header.append(NEATLOGS_SNIPPET.format(workflow=workflow))
+            header.append(NEATLOGS_SNIPPET.format(workflow=workflow,
+                                                  instrumentations=_instrumentations_arg(plan.root)))
         if header:
             # After the imports, but never below a decorator that needs `medic`.
             at = min([_import_index(tree), *(_statement_start(tree, t + 1) for t in tops)])

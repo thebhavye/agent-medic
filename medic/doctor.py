@@ -159,7 +159,15 @@ def tracing(proj) -> Check:
     if "release:" not in text:
         return Check("app tracing", WARN, "neatlogs.init has no release tag",
                      'add tags=["env:" + MEDIC_ENV, "release:" + GIT_SHA[:12]] so Medic can tell releases apart')
-    return Check("app tracing", OK, "neatlogs.init with env and release tags; deploy with GIT_SHA set")
+    from medic import tracing
+    wanted = tracing.detect(proj.root, check_installed=False)
+    if wanted and "instrumentations" not in text:
+        names = ", ".join(f'"{n}"' for n in wanted)
+        return Check("app tracing", WARN, "neatlogs.init names no instrumentations: your model calls aren't "
+                     "recorded (no LLM spans, no tokens)",
+                     f"add instrumentations=[{names}] to neatlogs.init")
+    return Check("app tracing", OK, "neatlogs.init with env and release tags"
+                 + (f" and instrumentations for {', '.join(wanted)}" if wanted else "") + "; deploy with GIT_SHA set")
 
 
 def run(root: Path) -> list[Check]:
