@@ -316,3 +316,29 @@ def test_a_sync_wrapper_returning_async_work_is_awaited_on_one_loop(tmp_path):
                           timeout=300)
     results = json.loads(out.read_text())["cases"]
     assert all(r["passed"] for r in results), [r["error"] or r["answer"] for r in results] or proc.stderr[-500:]
+
+
+def test_tool_work_before_and_after_handing_back_async_work_counts_toward_the_case(tmp_path):
+    (tmp_path / "mbot.py").write_text(
+        "import medic_runtime as medic\n\n\n"
+        "def broken(args):\n    raise KeyError('query')\n\n\n"              # a handler bug: code-shaped
+        "async def _finish(question):\n"
+        "    medic.guard_tool('lookup', {}, lambda: 'ok')\n"
+        "    return 'The pilot plant is in Narvik.'\n\n\n"
+        "@medic.entrypoint\n"
+        "def answer(question):\n"
+        "    try:\n"
+        "        medic.guard_tool('search', {}, lambda: broken({}))\n"
+        "    except KeyError:\n"
+        "        pass\n"                                                     # caught: the answer still comes
+        "    return _finish(question)\n")
+    cases = tmp_path / "cases.jsonl"
+    cases.write_text("".join(json.dumps({"id": f"c{i}", "question": "where?", "expect": [["Narvik"]]}) + "\n"
+                             for i in range(4)))
+    out = tmp_path / "out.json"
+    proc = subprocess.run([sys.executable, "-m", "medic.runner", "--entry", "mbot:answer", "--cases", str(cases),
+                           "--out", str(out), "--session", "s", "--workers", "2"], cwd=tmp_path,
+                          capture_output=True, text=True, env={**__import__("os").environ, "NEATLOGS_API_KEY": ""},
+                          timeout=300)
+    results = json.loads(out.read_text())["cases"]
+    assert [(r["tool_calls"], r["tool_errors"]) for r in results] == [(2, 1)] * 4, proc.stderr[-500:]

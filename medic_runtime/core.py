@@ -408,7 +408,18 @@ def value(name: str, default):
 @contextlib.contextmanager
 def request():
     """One agent request: the scope for the loop guard, for reporting each fix once, and the
-    unit armed mode judges (did this request fail the way code makes requests fail?)."""
+    unit armed mode judges (did this request fail the way code makes requests fail?).
+
+    Inside an open request (Medic's runner opens one per question, around the entrypoint and any
+    async work it hands back) it joins that request instead of starting another."""
+    outer = _request.get()
+    if outer is not None:
+        try:
+            yield
+        except Exception as exc:
+            outer["outage" if dependency_down(exc) else "failed"] = True
+            raise
+        return
     scope = {"calls": {}, "reported": set(), "failed": False, "outage": False, "tool_calls": 0,
              "engaged": _engagement() is not None if _standby() else False}
     token = _request.set(scope)

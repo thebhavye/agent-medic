@@ -10,6 +10,9 @@ the same way it runs its demo agent, and scores each answer against the expected
 
 import argparse
 import asyncio
+import concurrent.futures
+import contextlib
+import contextvars
 import importlib
 import inspect
 import json
@@ -82,13 +85,12 @@ def main(argv=None) -> int:
     with open(args.cases, encoding="utf-8") as f:
         cases = [json.loads(line) for line in f if line.strip()]
 
-    def record(case: dict, out, exc, started: float, stats: dict | None = None) -> dict:
+    def record(case: dict, out, exc, started: float) -> dict:
         if exc is None:
             answer, status, error = text_of(out), "ok", ""
         else:                                 # a failing agent is a failed case, not a crashed eval
             answer, status, error = "", "error", f"{type(exc).__name__}: {exc}"
-        if stats is None:
-            stats = medic_runtime.last_request()  # read right after the call: this case's request
+        stats = medic_runtime.last_request()  # the case's own request, which just closed
         result = {"status": status, "answer": answer, "error": error, "tool_calls": stats.get("tool_calls", 0),
                   # The runtime saw this request fail the way code fails (a tool error, a non-answer).
                   "tool_errors": int(bool(stats.get("failed")) and status == "ok"),
@@ -97,17 +99,22 @@ def main(argv=None) -> int:
         return {"id": case["id"], "question": case["question"], "expect": case.get("expect", []),
                 "passed": score(case, result), **result}
 
+    # Each case is one runtime request, opened here: everything the agent does for the question
+    # (the entrypoint, and any async work it hands back) counts toward it, wherever it runs.
+
     def run_case(case: dict) -> dict:
         started = time.monotonic()
         with neatlogs.trace(f"case:{case['id']}", session_id=args.session, case_id=case["id"]):
-            try:
-                out = entry(case["question"])
-            except Exception as exc:  # noqa: BLE001
-                return record(case, None, exc, started)
-            if inspect.isawaitable(out):     # a sync wrapper around async work (return async_answer(q))
-                out, exc, stats = asyncio.run_coroutine_threadsafe(_settle(out), shared_loop()).result()
-                return record(case, out, exc, started, stats)
-            return record(case, out, None, started)
+            out, exc = None, None
+            with contextlib.suppress(Exception), medic_runtime.request():
+                try:
+                    out = entry(case["question"])
+                    if inspect.isawaitable(out):     # a sync wrapper around async work (return async_answer(q))
+                        out = on_shared_loop(out, contextvars.copy_context())
+                except Exception as e:  # noqa: BLE001
+                    exc = e
+                    raise                            # so the request records how it failed
+            return record(case, out, exc, started)
 
     loop_box, loop_lock = {}, threading.Lock()
 
@@ -120,12 +127,19 @@ def main(argv=None) -> int:
                 loop_box["loop"] = loop
             return loop_box["loop"]
 
-    async def _settle(awaitable):
-        try:
-            out = await awaitable
-        except Exception as exc:  # noqa: BLE001
-            return None, exc, medic_runtime.last_request()
-        return out, None, medic_runtime.last_request()   # on the loop's thread, before anything else runs
+    def on_shared_loop(awaitable, ctx: contextvars.Context):
+        """Await on the shared loop, inside the caller's context (its request and its trace)."""
+        loop, done = shared_loop(), concurrent.futures.Future()
+
+        async def settle():
+            return await awaitable
+
+        def start():
+            task = ctx.run(loop.create_task, settle())       # the task runs in a copy of ctx
+            task.add_done_callback(lambda t: done.set_exception(t.exception()) if t.exception()
+                                   else done.set_result(t.result()))
+        loop.call_soon_threadsafe(start)
+        return done.result()
 
     async def run_async(cases: list[dict]) -> list[dict]:
         # One event loop for every case: async clients (AsyncOpenAI and other pooled ones) are
@@ -136,11 +150,14 @@ def main(argv=None) -> int:
             async with gate:
                 started = time.monotonic()
                 with neatlogs.trace(f"case:{case['id']}", session_id=args.session, case_id=case["id"]):
-                    try:
-                        out = await entry(case["question"])
-                    except Exception as exc:  # noqa: BLE001
-                        return record(case, None, exc, started)
-                    return record(case, out, None, started)
+                    out, exc = None, None
+                    with contextlib.suppress(Exception), medic_runtime.request():
+                        try:
+                            out = await entry(case["question"])
+                        except Exception as e:  # noqa: BLE001
+                            exc = e
+                            raise
+                    return record(case, out, exc, started)   # no await since the request closed
         return list(await asyncio.gather(*(one(c) for c in cases)))
 
     if inspect.iscoroutinefunction(entry):
