@@ -142,3 +142,20 @@ def test_check_returns_signals_after_baseline(tmp_path, monkeypatch):
 def test_check_needs_a_full_window(tmp_path, monkeypatch):
     watcher_ = seed(monkeypatch, tmp_path, [ev()])
     assert watcher_.check() == ([], {})
+
+
+def test_a_baseline_is_never_learned_from_traces_first_aid_answered(tmp_path, monkeypatch):
+    # Live on the first real project: a runtime armed by an earlier Medic healed a broken release
+    # by itself; a fresh Medic froze its baseline (and its "last known good") on that release.
+    aided = [ev(trace_id=f"a{i}", release="broken", first_aid=["auto:value:query_data.min_relevance"])
+             for i in range(6)]
+    watcher_ = seed(monkeypatch, tmp_path, aided)
+    watcher_.check()
+    assert watcher_.state["baseline"] is None and not watcher_.state.get("healthy_release")
+    mixed = [ev(trace_id=f"m{i}", release="r1" if i < 3 else "r2") for i in range(6)]
+    watcher_.state["traces"] = [e.to_dict() for e in mixed]
+    watcher_.check()
+    assert watcher_.state["baseline"] is None                           # a window spanning releases
+    watcher_.state["traces"] = [e.to_dict() for e in (mixed + [ev(trace_id=f"h{i}", release="r2") for i in range(6)])]
+    watcher_.check()
+    assert watcher_.state["healthy_release"] == "r2"                    # the code's own healthy traffic

@@ -174,8 +174,13 @@ class Watcher:
         if len(recent) < RECENT:
             return [], {}
         current = evidence.window(recent)
+        aided = any(e.first_aid for e in recent)
         if self.state["baseline"] is None:
-            if current["failure_rate"] <= HEALTHY_FAILURE_RATE:
+            # Never learn "healthy" from a bandage: traces first aid answered (a runtime that was
+            # armed before this Medic started heals a broken release by itself) look healthy but
+            # aren't the code's own, and a window spanning releases says nothing about either.
+            if (current["failure_rate"] <= HEALTHY_FAILURE_RATE and not aided and first_aid.active() is None
+                    and len(current["releases"]) == 1):
                 self.state["baseline"] = current
                 self.state["contract"] = contract.snapshot(paths.KB_URL, [e.question for e in recent])
                 self.state["healthy_release"] = recent[-1].release
@@ -187,7 +192,6 @@ class Watcher:
         # Under first aid a broken release looks healthy: its traces are the bandage's, not its own.
         # Judge by the traces themselves (an expired bundle leaves aided traces behind), and by
         # whether a bundle is live now (an aided trace may not show its span yet).
-        aided = any(e.first_aid for e in recent)
         if (not signals and len(current["releases"]) == 1 and not aided and first_aid.active() is None
                 and self._answers_verified(current["releases"][0])):
             self.state["healthy_release"] = current["releases"][0]
