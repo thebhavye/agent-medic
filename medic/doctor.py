@@ -77,13 +77,13 @@ def neatlogs_keys() -> list[Check]:
     out = []
     if not os.environ.get("NEATLOGS_API_KEY"):
         out.append(Check("neatlogs API key", FAIL, "NEATLOGS_API_KEY is not set",
-                         "add it to your app's .env (neatlogs dashboard -> project settings -> API keys)"))
+                         "add it to your app's .env (neatlogs: Settings -> API Keys)"))
     else:
         out.append(Check("neatlogs API key", OK, "NEATLOGS_API_KEY is set"))
     missing = [k for k in ("NEATLOGS_TOKEN", "NEATLOGS_PROJECT_ID") if not os.environ.get(k)]
     if missing:
         out.append(Check("neatlogs trace reads", FAIL, f"{', '.join(missing)} not set: Medic can't read traces back",
-                         "add them to .env (neatlogs dashboard -> API access)"))
+                         "add them to .env (neatlogs: Settings -> Service Accounts, scope observability:read)"))
     else:
         try:
             from bisect_agent.neatlogs_api import NeatlogsReader
