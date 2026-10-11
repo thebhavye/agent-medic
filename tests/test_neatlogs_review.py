@@ -41,7 +41,7 @@ def test_follow_ups_count_but_one_rule_is_one_alert_per_read(nl):  # noqa: F811
     ours = state["rules"]["tool_failed"]
     fake.history[:] = [{"id": "f1", "ruleId": ours, "firedAt": iso(-20), "isFollowup": True},
                        {"id": "f2", "ruleId": ours, "firedAt": iso(-10), "isFollowup": True}]
-    assert [a["id"] for a in neatlogs_link.new_alerts(api)] == ["f1"]
+    assert [a["id"] for a in neatlogs_link.new_alerts(api)] == ["f1"]                  # one alert, merged
 
 
 def test_adding_the_webhook_keeps_existing_channels(nl):  # noqa: F811
@@ -49,18 +49,29 @@ def test_adding_the_webhook_keeps_existing_channels(nl):  # noqa: F811
     neatlogs_link.setup(api, log=lambda m: None)                      # first run: no public URL
     for r in fake.rules:
         r["channelMask"] = {"email": True, "slack": True, "webhookIds": ["team-hook"]}
-    patches = []
-    real = fake.handler
-
-    def spy(request):
-        if request.method == "PATCH":
-            patches.append(json.loads(request.content))
-        return real(request)
-    fake.handler = spy
-    api._client._transport = __import__("httpx").MockTransport(spy)
     state = neatlogs_link.setup(api, webhook_url="https://medic.example/hooks/neatlogs", log=lambda m: None)
-    assert patches and all(p["channelMask"]["email"] and p["channelMask"]["slack"] for p in patches)
-    assert all(set(p["channelMask"]["webhookIds"]) == {"team-hook", state["webhook"]} for p in patches)
+    assert not any(k.startswith("rule-webhook") for k in state["skipped"])        # the updates went through
+    for r in fake.rules:                                              # as the server now stores them
+        assert r["channelMask"]["email"] and r["channelMask"]["slack"]
+        assert set(r["channelMask"]["webhookIds"]) == {"team-hook", state["webhook"]}
+
+
+def test_a_fresh_worlds_floor_is_hard(nl):  # noqa: F811
+    fake, api = nl
+    state = neatlogs_link.setup(api, log=lambda m: None)
+    ours = state["rules"]["tool_failed"]
+    fake.history[:] = [{"id": "just-before", "ruleId": ours, "firedAt": iso(-10)}]
+    assert neatlogs_link.new_alerts(api, since=time.time() - 2) == []   # no overlap before a fresh world
+
+
+def test_repeats_of_a_rule_keep_every_sample(nl):  # noqa: F811
+    fake, api = nl
+    state = neatlogs_link.setup(api, log=lambda m: None)
+    ours = state["rules"]["tool_failed"]
+    fake.history[:] = [{"id": "f1", "ruleId": ours, "firedAt": iso(-20), "count": 3, "sampleTraceIds": ["t1", "t2"]},
+                       {"id": "f2", "ruleId": ours, "firedAt": iso(-10), "count": 5, "sampleTraceIds": ["t2", "t3"]}]
+    [alert] = neatlogs_link.new_alerts(api)
+    assert alert["sampleTraceIds"] == ["t1", "t2", "t3"] and alert["count"] == 5 and alert["repeats"] == 2
 
 
 def test_only_a_card_linking_these_traces_is_used(mcp_server):  # noqa: F811

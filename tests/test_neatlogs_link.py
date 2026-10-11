@@ -43,6 +43,12 @@ class FakeNeatlogs:
             item = {**body, "id": f"{path.strip('/')}-{len(listing[path][1]) + 1}"}
             listing[path][1].append(item)
             return httpx.Response(201, json={"success": True, "data": item})
+        if request.method == "PATCH" and path.startswith("/alert-rules/"):
+            rule = next((r for r in self.rules if r["id"] == path.rsplit("/", 1)[1]), None)
+            if rule is None:
+                return httpx.Response(404, json={"code": "not_found"})
+            rule.update(body)
+            return httpx.Response(200, json={"success": True, "data": rule})
         if request.method == "POST" and path.endswith("/feedback"):
             self.feedback.append((path.split("/")[2], body))
             return httpx.Response(201, json={"success": True, "data": {"id": "fb"}})

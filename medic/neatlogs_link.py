@@ -210,18 +210,26 @@ def new_alerts(api: Api, state: dict | None = None, since: float | None = None) 
     if not ours:
         return []
     now = time.time()
-    checkpoint = max(since or 0.0, float(state.get("alerts_read_until") or 0))
     seen = set(state.get("seen_alerts") or [])
     fires = api.call("GET", "/alert-history", limit=25).get("alertHistory", [])
     unseen = [f for f in fires if f.get("ruleId") in ours and f["id"] not in seen]
-    # A short overlap with the last read: an alert can be recorded a moment after it fired.
-    cutoff = max(checkpoint - 30, now - MAX_ALERT_AGE_S)
-    fresh, rules = [], set()
+    # A short overlap with the saved checkpoint (an alert can be recorded a moment after it
+    # fired); `since` is a hard floor: nothing from before a fresh world began.
+    cutoff = max(since or 0.0, float(state.get("alerts_read_until") or 0) - 30, now - MAX_ALERT_AGE_S)
+    by_rule: dict = {}
     for f in sorted(unseen, key=lambda f: f.get("firedAt", "")):
-        # Follow-ups count (the failure goes on); repeats of one rule in one read are one alert.
-        if _iso_ts(f.get("firedAt")) >= cutoff and f.get("ruleId") not in rules:
-            fresh.append(f)
-            rules.add(f.get("ruleId"))
+        if _iso_ts(f.get("firedAt")) < cutoff:
+            continue
+        # Follow-ups count (the failure goes on). Repeats of one rule in one read are one
+        # alert, carrying every repeat's sample traces and the latest count.
+        if f.get("ruleId") not in by_rule:
+            by_rule[f.get("ruleId")] = {**f, "sampleTraceIds": list(f.get("sampleTraceIds") or [])}
+        else:
+            merged = by_rule[f.get("ruleId")]
+            merged["sampleTraceIds"] = list(dict.fromkeys(merged["sampleTraceIds"] + list(f.get("sampleTraceIds") or [])))
+            merged["count"] = f.get("count", merged.get("count"))
+            merged["repeats"] = merged.get("repeats", 1) + 1
+    fresh = list(by_rule.values())
     state["seen_alerts"] = sorted(seen | {f["id"] for f in unseen})[-500:]
     state["alerts_read_until"] = now
     save(state)
