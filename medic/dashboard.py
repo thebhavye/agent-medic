@@ -208,11 +208,18 @@ def build_state(medic_dir: Path) -> dict:
     medic_dir = Path(medic_dir)
     deploy = medic_dir / "deploy"
     state = _read_json(medic_dir / "state.json") or {}
-    commits = releases(deploy)
-    head = _git(deploy, "rev-parse", "HEAD").strip()
     # Health numbers use exactly the traces Medic decides on: the watcher's stored order, last
     # RECENT. The chart gets its own sample, sorted by start time and capped.
     stored = [slim_trace(t) for t in state.get("traces") or [] if isinstance(t, dict)]
+    if not (deploy / ".git").exists() and (medic_dir.parent / "medic.toml").exists():
+        # A user's project: the repo holds .medic/, and production is wherever they deploy it,
+        # so the live release is the one its newest traces carry.
+        deploy = medic_dir.parent
+        latest = next((t["release"] for t in reversed(stored) if t.get("release")), "")
+        head = _git(deploy, "rev-parse", "--verify", f"{latest}^{{commit}}").strip() if latest else ""
+    else:
+        head = _git(deploy, "rev-parse", "HEAD").strip()
+    commits = releases(deploy)
     traces = sorted(stored, key=lambda t: t["at"] or 0)[-TRACE_LIMIT:]
 
     incidents = [incident_view(i) for i in
