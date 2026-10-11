@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from medic import project as project_mod
+from medic.project import tomllib
 
 SKIP_DIRS = {".git", ".venv", "venv", "env", "node_modules", "__pycache__", ".medic", "site-packages", "dist",
              "build", ".tox", ".mypy_cache", ".pytest_cache"}
@@ -378,8 +379,8 @@ def run(root: Path, workflow: str | None = None, write: bool = False, mode: str 
             edits[project_mod.FILE] = project_mod.render(proj)
         deps = _dependencies(root)
         if deps is None:
-            plan.notes.append("no requirements.txt or pyproject.toml dependencies found: add "
-                              + " and ".join(line for _, line in REQUIREMENTS) + " to your app's dependencies")
+            plan.notes.append("could not add the dependencies automatically (no requirements.txt, or a "
+                              "pyproject.toml init can't edit safely): add " + " and ".join(line for _, line in REQUIREMENTS) + " to your app's dependencies")
         elif deps:
             edits[deps[0]] = deps[1]
         ignore = _gitignore(root)
@@ -423,7 +424,14 @@ def _dependencies(root: Path):
                 return None
             have = "".join(lines[i + 1:end]).lower()
             add = [f'    "{line}",\n' for name, line in REQUIREMENTS if f'"{name}' not in have]
-            return ("pyproject.toml", "".join(lines[:end] + add + lines[end:])) if add else ()
+            if not add:
+                return ()
+            body = lines[i + 1:end]
+            last = next((k for k in range(len(body) - 1, -1, -1)
+                         if body[k].strip() and not body[k].strip().startswith("#")), None)
+            if last is not None and not body[last].rstrip().endswith(","):
+                body[last] = body[last].rstrip() + ",\n"    # the old last entry needs its separator
+            return _checked_pyproject("".join(lines[:i + 1] + body + add + lines[end:]))
         if section == "[tool.poetry.dependencies]":
             block_end = next((j for j in range(i, len(lines)) if lines[j].strip().startswith("[")), len(lines))
             have = {re.split(r"\s*=", lines[j].strip(), maxsplit=1)[0].strip('"').lower()
@@ -436,8 +444,22 @@ def _dependencies(root: Path):
             at = block_end
             while at > i and not lines[at - 1].strip():
                 at -= 1                  # before the blank lines that close the table
-            return ("pyproject.toml", "".join(lines[:at] + add + lines[at:]))
+            if not lines[at - 1].endswith("\n"):
+                lines[at - 1] += "\n"            # a file without a final newline
+            return _checked_pyproject("".join(lines[:at] + add + lines[at:]))
     return None
+
+
+def _checked_pyproject(text: str):
+    """The proposed pyproject.toml, only if it still parses and now lists both dependencies; else
+    None, and init asks the user to add them by hand rather than break their build."""
+    try:
+        data = tomllib.loads(text)
+    except tomllib.TOMLDecodeError:
+        return None
+    listed = " ".join([*data.get("project", {}).get("dependencies", []),
+                       *data.get("tool", {}).get("poetry", {}).get("dependencies", {})]).lower()
+    return ("pyproject.toml", text) if all(name in listed for name, _ in REQUIREMENTS) else None
 
 
 def _gitignore(root: Path) -> str | None:

@@ -270,3 +270,25 @@ def test_a_release_deployed_before_medic_fetched_it_is_watched_after_the_fetch(t
     assert w._ours(["release:abc"]) and fetches == [1]
     assert w._ours(["release:abc"]) and fetches == [1]                    # known now: no more fetching
     assert not w._ours(["release:zzz"])                                   # unknown and fetched a moment ago
+
+
+def test_async_agents_share_one_event_loop(tmp_path):
+    (tmp_path / "abot.py").write_text(
+        "import asyncio\n_loop = []\n\n\n"
+        "async def answer(question):\n"
+        "    loop = asyncio.get_running_loop()\n"
+        "    _loop.append(_loop[0] if _loop else loop)\n"
+        "    if _loop[0] is not loop:\n"
+        "        raise RuntimeError('client bound to another event loop')\n"   # what a pooled client does
+        "    await asyncio.sleep(0.01)\n"
+        "    return 'The pilot plant is in Narvik.'\n")
+    cases = tmp_path / "cases.jsonl"
+    cases.write_text("".join(json.dumps({"id": f"c{i}", "question": "where?", "expect": [["Narvik"]]}) + "\n"
+                             for i in range(6)))
+    out = tmp_path / "out.json"
+    proc = subprocess.run([sys.executable, "-m", "medic.runner", "--entry", "abot:answer", "--cases", str(cases),
+                           "--out", str(out), "--session", "s", "--workers", "3"], cwd=tmp_path,
+                          capture_output=True, text=True, env={**__import__("os").environ, "NEATLOGS_API_KEY": ""},
+                          timeout=300)
+    results = json.loads(out.read_text())["cases"]
+    assert all(r["passed"] for r in results), [r["error"] for r in results] or proc.stderr[-500:]

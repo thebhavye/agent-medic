@@ -40,10 +40,6 @@ def contains(text: str, fact: str) -> bool:
     return re.search(r"(?<!\w)" + re.escape(fact.strip()) + r"(?!\w)", text) is not None
 
 
-async def _await(awaitable):
-    return await awaitable
-
-
 def load_entry(spec: str):
     module, _, name = spec.partition(":")
     if not module or not name:
@@ -85,17 +81,12 @@ def main(argv=None) -> int:
     with open(args.cases, encoding="utf-8") as f:
         cases = [json.loads(line) for line in f if line.strip()]
 
-    def run_case(case: dict) -> dict:
-        started = time.monotonic()
-        with neatlogs.trace(f"case:{case['id']}", session_id=args.session, case_id=case["id"]):
-            try:
-                out = entry(case["question"])
-                if inspect.isawaitable(out):          # an async agent
-                    out = asyncio.run(_await(out))
-                answer, status, error = text_of(out), "ok", ""
-            except Exception as exc:  # a failing agent is a failed case, not a crashed eval
-                answer, status, error = "", "error", f"{type(exc).__name__}: {exc}"
-        stats = medic_runtime.last_request()
+    def record(case: dict, out, exc, started: float) -> dict:
+        if exc is None:
+            answer, status, error = text_of(out), "ok", ""
+        else:                                 # a failing agent is a failed case, not a crashed eval
+            answer, status, error = "", "error", f"{type(exc).__name__}: {exc}"
+        stats = medic_runtime.last_request()  # read right after the call: this case's request
         result = {"status": status, "answer": answer, "error": error, "tool_calls": stats.get("tool_calls", 0),
                   # The runtime saw this request fail the way code fails (a tool error, a non-answer).
                   "tool_errors": int(bool(stats.get("failed")) and status == "ok"),
@@ -104,8 +95,35 @@ def main(argv=None) -> int:
         return {"id": case["id"], "question": case["question"], "expect": case.get("expect", []),
                 "passed": score(case, result), **result}
 
-    with ThreadPoolExecutor(max_workers=args.workers) as pool:
-        results = list(pool.map(run_case, cases))
+    def run_case(case: dict) -> dict:
+        started = time.monotonic()
+        with neatlogs.trace(f"case:{case['id']}", session_id=args.session, case_id=case["id"]):
+            try:
+                return record(case, entry(case["question"]), None, started)
+            except Exception as exc:  # noqa: BLE001
+                return record(case, None, exc, started)
+
+    async def run_async(cases: list[dict]) -> list[dict]:
+        # One event loop for every case: async clients (AsyncOpenAI and other pooled ones) are
+        # usually shared across calls and bound to the loop they first ran on.
+        gate = asyncio.Semaphore(args.workers)
+
+        async def one(case: dict) -> dict:
+            async with gate:
+                started = time.monotonic()
+                with neatlogs.trace(f"case:{case['id']}", session_id=args.session, case_id=case["id"]):
+                    try:
+                        out = await entry(case["question"])
+                    except Exception as exc:  # noqa: BLE001
+                        return record(case, None, exc, started)
+                    return record(case, out, None, started)
+        return list(await asyncio.gather(*(one(c) for c in cases)))
+
+    if inspect.iscoroutinefunction(entry):
+        results = asyncio.run(run_async(cases))
+    else:
+        with ThreadPoolExecutor(max_workers=args.workers) as pool:
+            results = list(pool.map(run_case, cases))
     neatlogs.flush()
     neatlogs.shutdown()
     with open(args.out, "w", encoding="utf-8") as f:

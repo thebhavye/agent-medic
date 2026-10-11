@@ -154,7 +154,7 @@ def test_shared_names_stay_apart_and_imports_come_before_decorators(tmp_path):
     assert bot.index("import medic_runtime as medic") < bot.index("@medic.surface")
     assert 'return [q, MODEL]' in bot                                  # the parameter is not the setting
     assert {"bot.py", "medic.toml"} <= set(edits)
-    assert "no requirements.txt or pyproject.toml" in init_mod.report(plan)
+    assert "could not add the dependencies automatically" in init_mod.report(plan)
 
 
 def test_dependencies_go_into_pyproject_when_there_is_no_requirements_file(tmp_path):
@@ -169,3 +169,32 @@ def test_dependencies_go_into_pyproject_when_there_is_no_requirements_file(tmp_p
     init_mod.run(tmp_path, write=True)
     poetry = tomllib.loads((tmp_path / "pyproject.toml").read_text())["tool"]["poetry"]["dependencies"]
     assert poetry["neatlogs"] == "*" and poetry["agent-medic"]["git"].endswith("agent-medic.git")
+
+
+@pytest.mark.parametrize("pyproject", [
+    '[project]\nname = "bot"\ndependencies = [\n    "openai>=1"\n]\n',                  # no trailing comma
+    '[project]\nname = "bot"\ndependencies = [\n    "openai>=1",  # chat\n]\n',
+    '[tool.poetry.dependencies]\npython = "^3.11"',                                # no final newline
+])
+def test_dependency_edits_keep_pyproject_valid(tmp_path, pyproject):
+    (tmp_path / "bot.py").write_text('from openai import OpenAI\n\nclient = OpenAI()\n\n\n'
+                                     'def answer(question: str) -> str:\n'
+                                     '    return client.chat.completions.create(model="m", messages=[])\n')
+    (tmp_path / "pyproject.toml").write_text(pyproject)
+    init_mod.run(tmp_path, write=True)
+    data = tomllib.loads((tmp_path / "pyproject.toml").read_text())                 # still valid TOML
+    listed = " ".join([*data.get("project", {}).get("dependencies", []),
+                       *data.get("tool", {}).get("poetry", {}).get("dependencies", {})])
+    assert "openai" in listed or "python" in listed
+    assert "agent-medic" in listed and "neatlogs" in listed
+
+
+def test_a_pyproject_init_cannot_edit_safely_is_left_alone(tmp_path):
+    (tmp_path / "bot.py").write_text('from openai import OpenAI\n\nclient = OpenAI()\n\n\n'
+                                     'def answer(question: str) -> str:\n'
+                                     '    return client.chat.completions.create(model="m", messages=[])\n')
+    text = '[project]\nname = "bot"\ndependencies = [\n    "openai>=1"  # chat\n]\n'      # comma would land in the comment
+    (tmp_path / "pyproject.toml").write_text(text)
+    plan, edits, _ = init_mod.run(tmp_path, write=True)
+    assert (tmp_path / "pyproject.toml").read_text() == text and "pyproject.toml" not in edits
+    assert "could not add the dependencies automatically" in init_mod.report(plan)
