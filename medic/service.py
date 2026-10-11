@@ -53,13 +53,25 @@ def alive(pid: int) -> bool:
         ok = kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
         kernel32.CloseHandle(handle)
         return bool(ok) and code.value == 259                       # STILL_ACTIVE
+    # A child that exited stays a zombie until its parent collects it, and os.kill(pid, 0)
+    # still succeeds on a zombie: collect it if it's ours, and never count a zombie as running.
+    try:
+        done, _ = os.waitpid(int(pid), os.WNOHANG)
+        if done:
+            return False
+    except ChildProcessError:
+        pass                                 # not our child: someone else collects it
     try:
         os.kill(int(pid), 0)
-        return True
     except ProcessLookupError:
         return False
     except PermissionError:
         return True
+    try:
+        with open(f"/proc/{int(pid)}/stat", encoding="utf-8") as f:
+            return f.read().rsplit(")", 1)[1].split()[0] != "Z"
+    except (OSError, IndexError):
+        return True                          # no /proc (macOS): os.kill said it exists
 
 
 def started_at(pid: int) -> str | None:
