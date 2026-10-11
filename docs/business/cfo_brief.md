@@ -46,6 +46,10 @@ Fixer tokens are real model usage. Benchmark eval tokens are estimated (characte
 request) because the benchmark's target agent is a deterministic scripted policy; the live
 incident's are real. Treat the monitoring cost as an estimate until re-measured on a model.
 
+Re-measured since on the real RAG app: 299 input + 190 output tokens per known-answer
+question, so $3.24 per agent per month on Claude Haiku at a 10-minute check (vs the $8.61
+estimate). Tool-using agents cost more per question; measure per customer.
+
 - Median per incident: 3,110 fixer tokens, 30,058 eval tokens, 127 s to detect (fault
   injection -> incident open; benchmark runs only), 426 s (~7 min) to resolve from incident
   open, 1 fix attempt (p90: 5,221 / 47,506 tokens, 594 s to resolve, 3 attempts).
