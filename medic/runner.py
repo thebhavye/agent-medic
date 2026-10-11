@@ -16,6 +16,7 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
@@ -81,12 +82,13 @@ def main(argv=None) -> int:
     with open(args.cases, encoding="utf-8") as f:
         cases = [json.loads(line) for line in f if line.strip()]
 
-    def record(case: dict, out, exc, started: float) -> dict:
+    def record(case: dict, out, exc, started: float, stats: dict | None = None) -> dict:
         if exc is None:
             answer, status, error = text_of(out), "ok", ""
         else:                                 # a failing agent is a failed case, not a crashed eval
             answer, status, error = "", "error", f"{type(exc).__name__}: {exc}"
-        stats = medic_runtime.last_request()  # read right after the call: this case's request
+        if stats is None:
+            stats = medic_runtime.last_request()  # read right after the call: this case's request
         result = {"status": status, "answer": answer, "error": error, "tool_calls": stats.get("tool_calls", 0),
                   # The runtime saw this request fail the way code fails (a tool error, a non-answer).
                   "tool_errors": int(bool(stats.get("failed")) and status == "ok"),
@@ -99,9 +101,31 @@ def main(argv=None) -> int:
         started = time.monotonic()
         with neatlogs.trace(f"case:{case['id']}", session_id=args.session, case_id=case["id"]):
             try:
-                return record(case, entry(case["question"]), None, started)
+                out = entry(case["question"])
             except Exception as exc:  # noqa: BLE001
                 return record(case, None, exc, started)
+            if inspect.isawaitable(out):     # a sync wrapper around async work (return async_answer(q))
+                out, exc, stats = asyncio.run_coroutine_threadsafe(_settle(out), shared_loop()).result()
+                return record(case, out, exc, started, stats)
+            return record(case, out, None, started)
+
+    loop_box, loop_lock = {}, threading.Lock()
+
+    def shared_loop():
+        """One long-lived event loop for every awaited answer (async clients are bound to theirs)."""
+        with loop_lock:                      # worker threads ask at once: still exactly one loop
+            if "loop" not in loop_box:
+                loop = asyncio.new_event_loop()
+                threading.Thread(target=loop.run_forever, daemon=True).start()
+                loop_box["loop"] = loop
+            return loop_box["loop"]
+
+    async def _settle(awaitable):
+        try:
+            out = await awaitable
+        except Exception as exc:  # noqa: BLE001
+            return None, exc, medic_runtime.last_request()
+        return out, None, medic_runtime.last_request()   # on the loop's thread, before anything else runs
 
     async def run_async(cases: list[dict]) -> list[dict]:
         # One event loop for every case: async clients (AsyncOpenAI and other pooled ones) are
@@ -124,6 +148,8 @@ def main(argv=None) -> int:
     else:
         with ThreadPoolExecutor(max_workers=args.workers) as pool:
             results = list(pool.map(run_case, cases))
+        if "loop" in loop_box:
+            loop_box["loop"].call_soon_threadsafe(loop_box["loop"].stop)
     neatlogs.flush()
     neatlogs.shutdown()
     with open(args.out, "w", encoding="utf-8") as f:

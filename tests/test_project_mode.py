@@ -292,3 +292,27 @@ def test_async_agents_share_one_event_loop(tmp_path):
                           timeout=300)
     results = json.loads(out.read_text())["cases"]
     assert all(r["passed"] for r in results), [r["error"] for r in results] or proc.stderr[-500:]
+
+
+def test_a_sync_wrapper_returning_async_work_is_awaited_on_one_loop(tmp_path):
+    (tmp_path / "wbot.py").write_text(
+        "import asyncio\n_loop = []\n\n\n"
+        "async def _answer(question):\n"
+        "    loop = asyncio.get_running_loop()\n"
+        "    _loop.append(_loop[0] if _loop else loop)\n"
+        "    if _loop[0] is not loop:\n"
+        "        raise RuntimeError('client bound to another event loop')\n"
+        "    await asyncio.sleep(0.01)\n"
+        "    return 'The pilot plant is in Narvik.'\n\n\n"
+        "def answer(question):\n"
+        "    return _answer(question)\n")                                 # sync def, async work
+    cases = tmp_path / "cases.jsonl"
+    cases.write_text("".join(json.dumps({"id": f"c{i}", "question": "where?", "expect": [["Narvik"]]}) + "\n"
+                             for i in range(6)))
+    out = tmp_path / "out.json"
+    proc = subprocess.run([sys.executable, "-m", "medic.runner", "--entry", "wbot:answer", "--cases", str(cases),
+                           "--out", str(out), "--session", "s", "--workers", "3"], cwd=tmp_path,
+                          capture_output=True, text=True, env={**__import__("os").environ, "NEATLOGS_API_KEY": ""},
+                          timeout=300)
+    results = json.loads(out.read_text())["cases"]
+    assert all(r["passed"] for r in results), [r["error"] or r["answer"] for r in results] or proc.stderr[-500:]
