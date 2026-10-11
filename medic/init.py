@@ -29,6 +29,9 @@ QUESTION_PARAM = re.compile(r"^(q|msg)$|question|query|prompt|message|input|text
 LLM_SUFFIXES = ("chat.completions.create", "messages.create", "responses.create", "generate_content",
                 "ChatCompletion.create", "completion", "acompletion")
 LLM_RECEIVERS = {"llm", "model", "chat", "chain", "agent", "client"}
+ENGINE_METHODS = {"query", "aquery", "chat", "achat", "stream_chat", "complete", "acomplete"}
+ENGINE_RECEIVERS = ("engine", "llm", "agent", "index", "retriever_chat")
+ADAPTER = "medic_answer"     # the function init adds when the answer isn't a plain f(question)
 SETTING_NAME = re.compile(r"(PROMPT|SYSTEM|INSTRUCTION|TEMPLATE|MODEL|TEMPERATURE|TOP_?K|^K$|CHUNK|MAX_TOKENS|TOP_P|"
                           r"THRESHOLD|CUTOFF|RELEVANCE|MIN_SCORE|SIMILARITY|LIMIT|N_RESULTS|NUM_RESULTS)", re.I)
 MAX_SURFACES = 12
@@ -41,6 +44,7 @@ class Func:
     node: ast.FunctionDef
     calls: set = field(default_factory=set)
     llm: bool = False
+    cls: "ast.ClassDef | None" = None                     # set for a method
 
 
 @dataclass
@@ -54,6 +58,9 @@ class Plan:
     notes: list = field(default_factory=list)
     edits: dict = field(default_factory=dict)             # file -> new text
     script: "Func | None" = None                          # answer logic inside a no-argument main()
+    # How Medic calls the answer when it isn't a plain f(question): ("method", class) or
+    # ("request", request class, field). init then adds medic_answer(question) next to it.
+    adapter: tuple | None = None
 
 
 def _py_files(root: Path) -> list[Path]:
@@ -82,8 +89,13 @@ def _is_llm_call(call: ast.Call) -> bool:
     name = _dotted(call.func)
     if any(name == s or name.endswith("." + s) for s in LLM_SUFFIXES):
         return True
+    parts = name.split(".")
+    method, receiver = parts[-1], (parts[-2] if len(parts) > 1 else "").lower()
     # LangChain-style: llm.invoke(...), chain.invoke(...)
-    return name.split(".")[-1] in ("invoke", "ainvoke", "predict", "run") and name.split(".")[0].lower() in LLM_RECEIVERS
+    if method in ("invoke", "ainvoke", "predict", "run") and parts[0].lower() in LLM_RECEIVERS:
+        return True
+    # LlamaIndex-style: query_engine.query(...), chat_engine.chat(...), llm.complete(...)
+    return method in ENGINE_METHODS and any(word in receiver for word in ENGINE_RECEIVERS)
 
 
 def scan(root: Path) -> Plan:
@@ -102,19 +114,21 @@ def scan(root: Path) -> Plan:
         if "neatlogs.init(" in text:
             plan.has_neatlogs_init = True
             plan.has_release_tag = plan.has_release_tag or "release:" in text
-        for node in tree.body:
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                f = Func(node.name, rel, node)
-                for sub in ast.walk(node):
-                    if isinstance(sub, ast.Call):
-                        if _is_llm_call(sub):
-                            f.llm = True
-                        callee = sub.func.id if isinstance(sub.func, ast.Name) else (
-                            sub.func.attr if isinstance(sub.func, ast.Attribute) else None)
-                        if callee:
-                            f.calls.add(callee)
-                funcs.append(f)
-                by_name.setdefault(node.name, []).append(f)
+        defs = [(node, None) for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
+        defs += [(m, node) for node in tree.body if isinstance(node, ast.ClassDef)
+                 for m in node.body if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))]
+        for node, cls in defs:
+            f = Func(node.name, rel, node, cls=cls)
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Call):
+                    if _is_llm_call(sub):
+                        f.llm = True
+                    callee = sub.func.id if isinstance(sub.func, ast.Name) else (
+                        sub.func.attr if isinstance(sub.func, ast.Attribute) else None)
+                    if callee:
+                        f.calls.add(callee)
+            funcs.append(f)
+            by_name.setdefault(node.name, []).append(f)
 
     def resolve(name: str, caller: Func) -> Func | None:
         """A called name: the function in the caller's own file first (several files may each
@@ -131,7 +145,26 @@ def scan(root: Path) -> Plan:
         args = [a.arg for a in f.node.args.args if a.arg not in ("self", "cls")]
         return args[0] if args else ""
 
-    candidates = [f for f in funcs if reaches_llm(f) and QUESTION_PARAM.search(first_param(f) or '')]
+    # Request bodies a web handler takes: a class in the same file with a question-like str field
+    # (FastAPI/Pydantic `class ChatRequest(BaseModel): message: str`, a dataclass, a TypedDict).
+    bodies: dict[tuple, str] = {}
+    for rel, (_, tree) in trees.items():
+        for node in tree.body:
+            if isinstance(node, ast.ClassDef):
+                fields = [s.target.id for s in node.body if isinstance(s, ast.AnnAssign)
+                          and isinstance(s.target, ast.Name) and _dotted(s.annotation) == "str"]
+                hit = next((n for n in fields if QUESTION_PARAM.search(n)), None)
+                if hit:
+                    bodies[(rel, node.name)] = hit
+
+    def body_of(f: Func) -> str | None:
+        args = [a for a in f.node.args.args if a.arg not in ("self", "cls")]
+        if args and args[0].annotation is not None:
+            return _dotted(args[0].annotation) if (f.file, _dotted(args[0].annotation)) in bodies else None
+        return None
+
+    candidates = [f for f in funcs if reaches_llm(f) and f.name != "__init__"
+                  and (QUESTION_PARAM.search(first_param(f) or '') or body_of(f))]
     called = {id(resolve(c, f)) for f in candidates for c in f.calls}
     tops = [f for f in candidates if id(f) not in called] or candidates
     # Prefer an obvious name, then the shortest path to the model (the answer function itself).
@@ -147,7 +180,19 @@ def scan(root: Path) -> Plan:
             plan.notes.append("no entrypoint found: no function taking a question reaches a model call; "
                               "set [agent] entrypoint in medic.toml by hand")
         return plan
-    plan.entrypoint = tops[0]
+    entry = tops[0]
+    if entry.cls is not None:
+        init = next((m for m in entry.cls.body if isinstance(m, ast.FunctionDef) and m.name == "__init__"), None)
+        required = len(init.args.args) - 1 - len(init.args.defaults) if init else 0
+        if required > 0:
+            plan.notes.append(f"the answer is {entry.cls.name}.{entry.name}(), and {entry.cls.name}() needs "
+                              f"arguments: add a module-level `def {ADAPTER}(question): return "
+                              f"<your {entry.cls.name}>.{entry.name}(question)`, then run agent-medic init again")
+            return plan
+        plan.adapter = ("method", entry.cls.name)
+    elif not QUESTION_PARAM.search(first_param(entry) or "") and body_of(entry):
+        plan.adapter = ("request", body_of(entry), bodies[(entry.file, body_of(entry))])
+    plan.entrypoint = entry
     if len(tops) > 1:
         plan.notes.append("other possible entrypoints: " + ", ".join(f"{f.file}:{f.name}" for f in tops[1:4]))
 
@@ -156,8 +201,8 @@ def scan(root: Path) -> Plan:
     while queue and len(order) < MAX_SURFACES:
         name, caller = queue.pop(0)
         f = resolve(name, caller)
-        if f is None or f is plan.entrypoint or f in order:
-            continue
+        if f is None or f is plan.entrypoint or f in order or f.cls is not None:
+            continue                  # methods aren't swapped by first aid (only module-level parts)
         order.append(f)
         queue.extend((c, f) for c in sorted(f.calls))
     plan.surfaces = order
@@ -305,7 +350,9 @@ def build_edits(plan: Plan, workflow: str) -> dict[str, str]:
                     "medic.surface" in "".join(lines[top - 1:node.lineno]):
                 continue
             tops.append(top - 1)
-            inserts.append((top - 1, " " * node.col_offset + deco + "\n"))
+            # Right above the def: a framework's own decorators (@app.post(...)) stay outermost and
+            # register the wrapped function.
+            inserts.append((node.lineno - 1, " " * node.col_offset + deco + "\n"))
         present = {line.strip() for line in lines}
         header = [imp for imp in ("import medic_runtime as medic",) if imp not in present]
         if rel == plan.entrypoint.file and not plan.has_neatlogs_init:
@@ -320,10 +367,31 @@ def build_edits(plan: Plan, workflow: str) -> dict[str, str]:
         for index, text_ in sorted(inserts, key=lambda i: (i[0], i[1].lstrip().startswith("@")), reverse=True):
             lines.insert(index, text_)
         new = "".join(lines)
+        if rel == plan.entrypoint.file and plan.adapter and not re.search(rf"^(async )?def {ADAPTER}\(", new, re.M):
+            new = new.rstrip("\n") + "\n" + _adapter_source(plan) + "\n"
         ast.parse(new)                      # never propose a file that doesn't parse
         if new != text:                     # already connected: nothing to change in this file
             out[rel] = new
     return out
+
+
+def _adapter_source(plan: Plan) -> str:
+    """medic_answer(question): how Medic asks the agent a question when the answer is a method or a
+    web handler taking a request body. Production keeps calling the agent as before."""
+    entry, kind = plan.entrypoint, plan.adapter[0]
+    is_async = isinstance(entry.node, ast.AsyncFunctionDef)
+    head = f"{'async ' if is_async else ''}def {ADAPTER}(question: str):"
+    await_ = "await " if is_async else ""
+    note = "# Added by agent-medic init: Medic asks your agent its known-answer questions through this."
+    if kind == "method":
+        cls = plan.adapter[1]
+        return (f"\n\n{note}\n_medic_{cls.lower()} = None\n\n\n{head}\n"
+                f"    global _medic_{cls.lower()}\n"
+                f"    if _medic_{cls.lower()} is None:\n"
+                f"        _medic_{cls.lower()} = {cls}()\n"
+                f"    return {await_}_medic_{cls.lower()}.{entry.name}(question)")
+    body, field_name = plan.adapter[1], plan.adapter[2]
+    return f"\n\n{note}\n{head}\n    return {await_}{entry.name}({body}({field_name}=question))"
 
 
 def diff(plan: Plan, edits: dict[str, str]) -> str:
@@ -363,7 +431,12 @@ def report(plan: Plan) -> str:
         prompt = refactor_prompt(plan)
         return "\n".join(plan.notes + ([f"\nPaste this to your coding agent, then run agent-medic init again:\n\n"
                                         f"  {prompt}"] if prompt else []))
-    lines = [f"entrypoint  {plan.entrypoint.file}:{plan.entrypoint.name}"]
+    e = plan.entrypoint
+    lines = [f"entrypoint  {e.file}:{e.cls.name + '.' if e.cls is not None else ''}{e.name}"]
+    if plan.adapter:
+        how = (f"a {plan.adapter[1]}() instance" if plan.adapter[0] == "method"
+               else f"a {plan.adapter[1]}({plan.adapter[2]}=question) request")
+        lines.append(f"adapter     {e.file}:{ADAPTER}(question) added: Medic asks questions through {how}")
     lines += [f"surface     {f.file}:{f.name}" for f in plan.surfaces]
     lines += [f"value       {rel}:{name} ({len(loads)} use{'s' if len(loads) != 1 else ''})"
               for rel, name, loads in plan.values]
@@ -386,7 +459,7 @@ def run(root: Path, workflow: str | None = None, write: bool = False, mode: str 
     proj = None
     if plan.entrypoint is not None:
         files = sorted({plan.entrypoint.file, *(f.file for f in plan.surfaces), *(r for r, _, _ in plan.values)})
-        proj = project_mod.Project(root=root, entrypoint=f"{_module(plan.entrypoint.file)}:{plan.entrypoint.name}",
+        proj = project_mod.Project(root=root, entrypoint=f"{_module(plan.entrypoint.file)}:{ADAPTER if plan.adapter else plan.entrypoint.name}",
                                    files=files, workflow=workflow, mode=mode, branch=branch, pr=pr,
                                    python=_venv_python(root))
         if not (root / project_mod.FILE).exists():       # an existing medic.toml is the user's: kept

@@ -524,7 +524,7 @@ def entrypoint(fn):
         span = None
 
     def _question(args, kwargs):
-        return str(args[0] if args else next(iter(kwargs.values()), ""))
+        return question_of([*args, *kwargs.values()])
 
     if is_async:                         # the request stays open until the answer exists
         @functools.wraps(fn)
@@ -552,6 +552,24 @@ def entrypoint(fn):
                 return result
     call.__medic_entrypoint__ = True
     return call
+
+
+QUESTION_FIELDS = ("question", "query", "message", "prompt", "text", "input", "content", "q")
+
+
+def question_of(values: list) -> str:
+    """The user's question among an entrypoint's arguments: the first string (a method's `self`
+    is skipped), else a question-like field of the first argument that has one (a web handler's
+    request body, e.g. ChatRequest.message or a dict), else the first argument as text."""
+    for v in values:
+        if isinstance(v, str):
+            return v
+    for v in values:
+        for field in QUESTION_FIELDS:
+            got = v.get(field) if isinstance(v, dict) else getattr(v, field, None)
+            if isinstance(got, str):
+                return got
+    return str(values[0]) if values else ""
 
 
 def _answer_text(result) -> str:

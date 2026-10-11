@@ -116,5 +116,5 @@ def render(project: Project) -> str:
             f'[agent]\nentrypoint = "{project.entrypoint}"\nfiles = [{files}]\n'
             + (f'python = "{project.python}"\n' if project.python else '') + '\n'
             f'[neatlogs]\nworkflow = "{project.workflow}"\n\n'
-            f'[deploy]\nmode = "{project.mode}"\npr = "{project.pr}"\nbranch ="{project.branch}"\n\n'
+            f'[deploy]\nmode = "{project.mode}"\npr = "{project.pr}"\nbranch = "{project.branch}"\n\n'
             f'[evals]\ncases = "{project.cases}"\n')
