@@ -15,6 +15,7 @@ written without --write. Run it again after big refactors.
 import ast
 import difflib
 import re
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -28,7 +29,7 @@ LLM_SUFFIXES = ("chat.completions.create", "messages.create", "responses.create"
                 "ChatCompletion.create", "completion", "acompletion")
 LLM_RECEIVERS = {"llm", "model", "chat", "chain", "agent", "client"}
 SETTING_NAME = re.compile(r"(PROMPT|SYSTEM|INSTRUCTION|TEMPLATE|MODEL|TEMPERATURE|TOP_?K|^K$|CHUNK|MAX_TOKENS|TOP_P|"
-                          r"THRESHOLD|LIMIT|N_RESULTS|NUM_RESULTS)", re.I)
+                          r"THRESHOLD|CUTOFF|RELEVANCE|MIN_SCORE|SIMILARITY|LIMIT|N_RESULTS|NUM_RESULTS)", re.I)
 MAX_SURFACES = 12
 
 
@@ -315,10 +316,11 @@ def report(plan: Plan) -> str:
     return "\n".join(lines)
 
 
-def run(root: Path, workflow: str | None = None, write: bool = False, mode: str = "pr", branch: str = "main"):
+def run(root: Path, workflow: str | None = None, write: bool = False, mode: str = "pr", branch: str | None = None):
     """Scan, propose, and (with write) apply. Returns (plan, edits, project)."""
     root = root.resolve()
     workflow = workflow or root.name
+    branch = branch or _current_branch(root) or "main"
     plan = scan(root)
     edits = build_edits(plan, workflow)
     proj = None
@@ -326,12 +328,13 @@ def run(root: Path, workflow: str | None = None, write: bool = False, mode: str 
         module = plan.entrypoint.file[:-3].replace("/", ".")
         files = sorted({plan.entrypoint.file, *(f.file for f in plan.surfaces), *(r for r, _, _ in plan.values)})
         proj = project_mod.Project(root=root, entrypoint=f"{module}:{plan.entrypoint.name}", files=files,
-                                   workflow=workflow, mode=mode, branch=branch)
+                                   workflow=workflow, mode=mode, branch=branch, python=_venv_python(root))
         if write:
             for rel, new in edits.items():
                 (root / rel).write_text(new, encoding="utf-8")
             project_mod.write(proj)
             _requirements(root)
+            _gitignore(root)
     return plan, edits, proj
 
 
@@ -341,6 +344,33 @@ def _requirements(root: Path) -> None:
         return
     text = req.read_text(encoding="utf-8")
     names = {re.split(r"[<>=\[ ;]", line.strip(), maxsplit=1)[0].lower() for line in text.splitlines() if line.strip()}
-    add = [p for p in ("agent-medic", "neatlogs") if p not in names]
+    add = [line for name, line in REQUIREMENTS if name not in names]
     if add:
         req.write_text(text.rstrip("\n") + "\n" + "\n".join(add) + "\n", encoding="utf-8")
+
+
+def _gitignore(root: Path) -> None:
+    """Medic's working state (incidents, evidence, worktrees) never belongs in the user's history."""
+    path = root / ".gitignore"
+    text = path.read_text(encoding="utf-8") if path.exists() else ""
+    if ".medic/" in {line.strip() for line in text.splitlines()}:
+        return
+    path.write_text(text + ("\n" if text and not text.endswith("\n") else "") + ".medic/\n", encoding="utf-8")
+
+
+REQUIREMENTS = (("agent-medic", "agent-medic @ git+https://github.com/thebhavye/agent-medic.git"),
+                ("neatlogs", "neatlogs"))
+
+
+def _current_branch(root: Path) -> str:
+    proc = subprocess.run(["git", "branch", "--show-current"], cwd=root, capture_output=True, text=True)
+    return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
+def _venv_python(root: Path) -> str:
+    """The app's own virtualenv, so Medic runs it with its dependencies (relative to the repo root)."""
+    for venv in sorted(p for p in root.iterdir() if p.is_dir() and (p / "pyvenv.cfg").is_file()):
+        for exe in ("Scripts/python.exe", "bin/python"):
+            if (venv / exe).is_file():
+                return f"{venv.name}/{exe}"
+    return ""

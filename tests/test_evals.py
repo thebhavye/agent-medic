@@ -60,3 +60,30 @@ def test_from_questions_runs_the_agent_once(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "DEPLOY", tmp_path)
     cases = evals.from_questions(["Who rules Wonderland?"])
     assert cases[0]["expect"] == [["Queen of Hearts"]] and calls[0][1:3] == paths.RUNNER[:2]
+
+
+def test_facts_read_model_typography():
+    answer = "She plays **croquet**; either way is “mad”: the Mad Hatter or the March Hare."
+    assert evals.facts(answer, "What game?") == [["croquet"], ["Mad Hatter"], ["March Hare"]]
+    assert evals.facts("It says **“DRINK ME.”**", "What is on the bottle?") == [["DRINK ME"]]
+    assert evals.facts("The Cheshire Cat points; the Cat grins.", "Who?") == [["Cheshire Cat"]]
+
+
+def test_from_questions_keeps_only_the_facts_every_answer_agrees_on(tmp_path, monkeypatch):
+    answers = {"q0-r0": "The White Rabbit is late for the Queen.", "q0-r1": "He is late for a very important date.",
+               "q1-r0": "It is labelled **DRINK ME** by the Queen.", "q1-r1": "The label says DRINK ME."}
+
+    def fake_run(cmd, **kw):
+        cases = [json.loads(line) for line in open(cmd[cmd.index("--cases") + 1], encoding="utf-8")]
+        with open(cmd[cmd.index("--out") + 1], "w", encoding="utf-8") as f:
+            json.dump({"cases": [{**c, "status": "ok", "answer": answers[c["id"]]} for c in cases]}, f)
+    monkeypatch.setattr(evals.subprocess, "run", fake_run)
+    monkeypatch.setattr(paths, "DEPLOY", tmp_path)
+    skipped = []
+    cases = evals.from_questions(["Who is the White Rabbit late for?", "What is on the bottle?"], log=skipped.append)
+    assert [c["expect"] for c in cases] == [[["DRINK ME"]]]                # "Queen" only sometimes: dropped
+    assert "disagree" in skipped[0]
+
+
+def test_a_fact_ending_in_punctuation_is_kept_once():
+    assert [g[0] for g in evals.facts("It asks “Who are you?” and *Who are you?*", "What?")].count("Who are you?") == 1

@@ -244,7 +244,7 @@ def main() -> int:
     ini.add_argument("--write", action="store_true", help="apply the edits (default: show the diff only)")
     ini.add_argument("--workflow", help="neatlogs workflow name (default: the folder name)")
     ini.add_argument("--mode", choices=["pr", "managed"], default="pr", help="pr: fixes arrive as pull requests")
-    ini.add_argument("--branch", default="main")
+    ini.add_argument("--branch", help="the branch fixes go to (default: the current one)")
     ini.set_defaults(func=cmd_init)
 
     ev = sub.add_parser("evals", help="known-answer questions from healthy traffic (no tests to write)")

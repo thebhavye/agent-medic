@@ -120,3 +120,18 @@ def test_no_entrypoint_is_said_plainly(tmp_path):
     plan, edits, proj = init_mod.run(tmp_path)
     assert plan.entrypoint is None and proj is None and edits == {}
     assert "no entrypoint found" in init_mod.report(plan)
+
+
+def test_write_finds_the_apps_venv_and_keeps_medic_state_out_of_git(app):
+    (app / ".venv").mkdir()
+    (app / ".venv" / "pyvenv.cfg").write_text("home = x\n")
+    (app / ".venv" / "bin").mkdir()
+    (app / ".venv" / "bin" / "python").write_text("")
+    (app / ".gitignore").write_text("__pycache__/")              # no trailing newline
+    (app / "requirements.txt").write_text("openai\n")
+    init_mod.run(app, write=True)
+    assert tomllib.loads((app / "medic.toml").read_text())["agent"]["python"] == ".venv/bin/python"
+    assert (app / ".gitignore").read_text().splitlines() == ["__pycache__/", ".medic/"]
+    assert "agent-medic @ git+https://" in (app / "requirements.txt").read_text()
+    init_mod.run(app, write=True)
+    assert (app / ".gitignore").read_text().count(".medic/") == 1
