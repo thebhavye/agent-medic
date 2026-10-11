@@ -566,7 +566,14 @@ class Medic:
         accepted = next((a for a in reversed(inc.remedy.get("attempts", [])) if a.get("accepted")), {})
         title = f"Medic: {accepted.get('commit_title') or 'fix for incident ' + inc.id}"
         if proj.pr == "ready" and not inc.deploy.get("approved"):
-            ready = delivery.prepare_pr(inc, inc.remedy["branch"], proj.branch, title, paths.MEDIC_DIR / "prs")
+            try:
+                ready = delivery.prepare_pr(inc, inc.remedy["branch"], proj.branch, title, paths.MEDIC_DIR / "prs",
+                                            paths.DEPLOY)
+            except delivery.DeliveryError as exc:
+                inc.note("escalated", f"could not prepare the fix PR ({exc}); the fix is on branch "
+                                      f"{inc.remedy['branch']}", self.log)
+                inc.phase = "escalated"
+                return
             inc.deploy = {**inc.deploy, "mode": "pr", "ready": ready, "at": time.time()}
             inc.note("remedy", f"fix PR ready, not opened: review {ready['body_file']}, then open it with "
                                f"`agent-medic approve {inc.id}` (or: {' && '.join(ready['commands'])})", self.log)

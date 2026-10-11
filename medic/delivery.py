@@ -9,6 +9,7 @@ Uses git and the GitHub CLI (gh) with the user's own credentials.
 """
 
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -28,6 +29,16 @@ def _run(cmd: list[str], root: Path, check: bool = True) -> str:
     if check and proc.returncode != 0:
         raise DeliveryError(f"{' '.join(cmd[:3])}: {(proc.stderr or proc.stdout).strip()[-400:]}")
     return proc.stdout.strip()
+
+
+def repo(root: Path) -> str:
+    """owner/name of the repo `origin` points to. Every PR goes there, and only there: in a clone
+    of a fork, gh would otherwise default to the upstream project, someone else's repo."""
+    url = _run(["git", "remote", "get-url", "origin"], root)
+    m = re.search(r"github\.com[:/]([^/\s]+)/([^/\s]+?)(?:\.git)?/?$", url)
+    if not m:
+        raise DeliveryError(f"origin is not a GitHub repo ({url}); PR delivery needs one")
+    return f"{m.group(1)}/{m.group(2)}"
 
 
 def fetch(root: Path) -> None:
@@ -72,26 +83,27 @@ def open_pr(inc, branch: str, base: str, root: Path, title: str) -> dict:
     _run(["git", "push", "--quiet", "--force-with-lease", "origin", f"{branch}:{branch}"], root)
     url = existing_pr(branch, root)     # Medic stopped after opening it last time: track that one
     if not url:
-        url = _run(["gh", "pr", "create", "--base", base, "--head", branch, "--title", title,
+        url = _run(["gh", "pr", "create", "--repo", repo(root), "--base", base, "--head", branch, "--title", title,
                     "--body", body(inc)], root).splitlines()[-1].strip()
     return {"url": url, "branch": branch, "base": base}
 
 
-def prepare_pr(inc, branch: str, base: str, title: str, out_dir: Path) -> dict:
+def prepare_pr(inc, branch: str, base: str, title: str, out_dir: Path, root: Path) -> dict:
     """The PR, ready but not opened (medic.toml: [deploy] pr = "ready"). Nothing is pushed: the fix
     branch stays in the local repo and the description is written to a file. The user opens it
     with `agent-medic approve <id>`, or with the two commands returned here."""
+    target = repo(root)
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"{inc.id}.md"
     path.write_text(body(inc) + "\n", encoding="utf-8")
-    return {"branch": branch, "base": base, "title": title, "body_file": str(path),
+    return {"branch": branch, "base": base, "title": title, "body_file": str(path), "repo": target,
             "commands": [f"git push origin {branch}",
-                         f'gh pr create --base {base} --head {branch} --title "{title.replace(chr(34), chr(39))}" '
+                         f'gh pr create --repo {target} --base {base} --head {branch} --title "{title.replace(chr(34), chr(39))}" '
                          f'--body-file "{path}"']}
 
 
 def existing_pr(branch: str, root: Path) -> str:
-    raw = _run(["gh", "pr", "list", "--head", branch, "--state", "all", "--json", "url,state", "--limit", "5"], root)
+    raw = _run(["gh", "pr", "list", "--repo", repo(root), "--head", branch, "--state", "all", "--json", "url,state", "--limit", "5"], root)
     prs = json.loads(raw or "[]")
     live = [pr for pr in prs if pr.get("state") in ("OPEN", "MERGED")]
     return live[0]["url"] if live else ""
@@ -116,7 +128,7 @@ def revert_pr(inc, merge_commit: str, base: str, root: Path, why: str, worktrees
         revert = ["git", "revert", "--no-edit"] + (["-m", "1"] if len(parents) > 2 else []) + [merge_commit]
         _run(["git", "-c", "user.name=Agent Medic", "-c", "user.email=medic@localhost", *revert[1:]], work)
         _run(["git", "push", "--quiet", "--force-with-lease", "origin", f"{branch}:{branch}"], work)
-        url = _run(["gh", "pr", "create", "--base", base, "--head", branch,
+        url = _run(["gh", "pr", "create", "--repo", repo(root), "--base", base, "--head", branch,
                     "--title", f"Revert Medic's fix for incident {inc.id}",
                     "--body", f"**Agent Medic**: production is still unhealthy with the fix: {why}\n\n"
                               f"This reverts {merge_commit[:10]}; a human should look at it."], work)
