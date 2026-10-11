@@ -283,8 +283,12 @@ def build_state(medic_dir: Path) -> dict:
     }
 
 
+WEBHOOK_MAX_BYTES = 1 << 20
+
+
 class Handler(BaseHTTPRequestHandler):
     medic_dir: Path = paths.MEDIC_DIR
+    timeout = 10        # seconds per socket operation: a slow or stalled client can't hold a thread
 
     def _send(self, code: int, body: bytes, ctype: str) -> None:
         self.send_response(code)
@@ -310,7 +314,16 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.split("?", 1)[0] != "/hooks/neatlogs":
             self._send(404, b"not found", "text/plain; charset=utf-8")
             return
-        length = min(int(self.headers.get("Content-Length") or 0), 1 << 20)
+        # The endpoint is public: refuse a missing, malformed, negative or oversized length
+        # before reading anything (the class timeout bounds a slow sender).
+        try:
+            length = int(self.headers.get("Content-Length", ""))
+        except ValueError:
+            length = -1
+        if not 0 <= length <= WEBHOOK_MAX_BYTES:
+            self._send(413 if length > WEBHOOK_MAX_BYTES else 411, b"bad length", "text/plain; charset=utf-8")
+            self.close_connection = True
+            return
         self.rfile.read(length)                    # drain the body; its content is not trusted
         bell = Path(self.medic_dir) / "neatlogs" / "doorbell"
         bell.parent.mkdir(parents=True, exist_ok=True)

@@ -72,7 +72,7 @@ def drive(scenario: str, workdir: Path) -> dict:
 
     world.chaos("normal")
     initial = world.init(force=True)
-    medic = Medic(NeatlogsReader(), log=log)
+    medic = Medic(NeatlogsReader(), log=log, alerts_since=time.time())   # a fresh world
 
     def tick() -> None:
         try:

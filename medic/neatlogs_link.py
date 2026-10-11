@@ -173,7 +173,10 @@ def setup(api: Api, baseline: dict | None = None, webhook_url: str | None = None
             have = set(((existing.get("channelMask") or {}).get("webhookIds")) or [])
             if wanted - have:
                 try:
-                    api.call("PATCH", f"/alert-rules/{existing['id']}", {"channelMask": rule["channelMask"]})
+                    # Add Medic's webhook to the rule's channels; keep the email, Slack and other
+                    # webhooks people turned on.
+                    channels = {**(existing.get("channelMask") or {}), "webhookIds": sorted(have | wanted)}
+                    api.call("PATCH", f"/alert-rules/{existing['id']}", {"channelMask": channels})
                     log(f"[neatlogs] alert rule now delivers to the webhook: {rule['name']}")
                 except NeatlogsError as exc:
                     state["skipped"][f"rule-webhook:{key}"] = str(exc)
@@ -194,23 +197,35 @@ def setup(api: Api, baseline: dict | None = None, webhook_url: str | None = None
 MAX_ALERT_AGE_S = 900    # an alert older than this describes some earlier moment, not now
 
 
-def new_alerts(api: Api, state: dict | None = None, since: float = 0.0) -> list[dict]:
-    """Fires of Medic's own rules that Medic hasn't seen, that fired after `since` (when this
-    Medic started watching) and in the last few minutes; oldest first. Older fires are marked
-    seen without acting on them: a stale alert must never open an incident."""
+def new_alerts(api: Api, state: dict | None = None, since: float | None = None) -> list[dict]:
+    """Fires of Medic's own rules that Medic hasn't handled, oldest first, one per rule.
+
+    The cutoff is the saved checkpoint of the last read, so an alert that fired while Medic was
+    restarting is still handled; `since` overrides it for a fresh world (a benchmark run starts
+    a new deployment, and earlier runs' alerts are about something else). Nothing older than a
+    few minutes counts either way. Older fires are marked seen without acting on them: a stale
+    alert must never open an incident."""
     state = state if state is not None else load()
     ours = set((state.get("rules") or {}).values())
     if not ours:
         return []
+    now = time.time()
+    checkpoint = max(since or 0.0, float(state.get("alerts_read_until") or 0))
     seen = set(state.get("seen_alerts") or [])
     fires = api.call("GET", "/alert-history", limit=25).get("alertHistory", [])
-    unseen = [f for f in fires if f.get("ruleId") in ours and f["id"] not in seen and not f.get("isFollowup")]
-    cutoff = max(since, time.time() - MAX_ALERT_AGE_S)
-    fresh = [f for f in unseen if _iso_ts(f.get("firedAt")) >= cutoff]
-    if unseen:
-        state["seen_alerts"] = sorted(seen | {f["id"] for f in unseen})[-500:]
-        save(state)
-    return sorted(fresh, key=lambda f: f.get("firedAt", ""))
+    unseen = [f for f in fires if f.get("ruleId") in ours and f["id"] not in seen]
+    # A short overlap with the last read: an alert can be recorded a moment after it fired.
+    cutoff = max(checkpoint - 30, now - MAX_ALERT_AGE_S)
+    fresh, rules = [], set()
+    for f in sorted(unseen, key=lambda f: f.get("firedAt", "")):
+        # Follow-ups count (the failure goes on); repeats of one rule in one read are one alert.
+        if _iso_ts(f.get("firedAt")) >= cutoff and f.get("ruleId") not in rules:
+            fresh.append(f)
+            rules.add(f.get("ruleId"))
+    state["seen_alerts"] = sorted(seen | {f["id"] for f in unseen})[-500:]
+    state["alerts_read_until"] = now
+    save(state)
+    return fresh
 
 
 def doorbell() -> Path:

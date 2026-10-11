@@ -23,12 +23,14 @@ ROLLOUT = os.environ.get("MEDIC_ROLLOUT", "canary")    # canary | direct
 
 
 class Medic:
-    def __init__(self, reader, auto_deploy: bool = True, log=print) -> None:
+    def __init__(self, reader, auto_deploy: bool = True, log=print, alerts_since: float | None = None) -> None:
         self.reader = reader
         self.watcher = Watcher(reader, log=log)
         self.auto_deploy = auto_deploy
         self.log = log
-        self.started_at = time.time()      # neatlogs alerts from before this are not about now
+        # neatlogs alerts are read from the saved checkpoint, so a restart misses none; a fresh
+        # world (a benchmark run) passes its start, and earlier worlds' alerts are ignored.
+        self.alerts_since = alerts_since
 
     def tick(self) -> None:
         added = self.watcher.poll()
@@ -89,7 +91,7 @@ class Medic:
         if api is None:
             return []
         try:
-            return neatlogs_link.new_alerts(api, since=getattr(self, "started_at", 0.0))
+            return neatlogs_link.new_alerts(api, since=getattr(self, "alerts_since", None))
         except Exception as exc:  # noqa: BLE001 - neatlogs down: Medic's own signals still work
             self.log(f"[neatlogs] alert history unavailable: {type(exc).__name__}: {exc}")
             return []
