@@ -207,10 +207,13 @@ def cmd_init(args) -> int:
         print("\nThis was a dry run. Review the diff, then: agent-medic init --write")
         return 0
     print(f"\nwrote {', '.join(edits) or 'nothing (already connected)'}. Next:")
-    print("  1. commit, and deploy with GIT_SHA set to the commit (and MEDIC_ENV=prod) in production")
-    print("  2. agent-medic neatlogs setup        # detections and alert rules in your neatlogs project")
-    print("  3. agent-medic evals bootstrap       # known-answer questions from your healthy traffic")
-    print("  4. agent-medic watch")
+    print("  1. pip install -r requirements.txt, commit, and deploy with GIT_SHA set to the commit")
+    print("     (and MEDIC_ENV=prod) in production")
+    print("  2. agent-medic evals bootstrap --questions questions.txt   # a few real questions, one per line")
+    print("     (or `agent-medic evals bootstrap` once production has traffic)")
+    print("  3. agent-medic neatlogs setup        # detections and alert rules in your neatlogs project")
+    print("  4. agent-medic doctor                # checks the rest, and says what's missing")
+    print("  5. agent-medic start --dashboard     # Medic in the background; `agent-medic stop` to end it")
     return 0
 
 
