@@ -166,6 +166,13 @@ class Medic:
                 pending.clear()
         if resolved and card and neatlogs_link.update_fix(card, "resolved", note=f"Agent Medic: {text}"):
             inc.neatlogs["suggestion_resolved"] = card
+        if not notes[-1]["card"]:
+            # No card to carry it (neatlogs makes cards for crashes, not quiet failures): the
+            # account goes into neatlogs as an incident report linked to the failing traces.
+            report = neatlogs_link.log_report(inc, text, notes, {**inc.neatlogs.get("pending", {}), **sections},
+                                              paths.WORKFLOW)
+            if report:
+                notes[-1]["report"] = report
 
     def _late_neatlogs_card(self, inc: Incident) -> None:
         """neatlogs investigates on its own schedule, often after Medic's diagnosis: look again,

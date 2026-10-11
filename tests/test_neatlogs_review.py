@@ -103,6 +103,7 @@ def test_pending_card_sections_wait_for_a_late_card(monkeypatch):
     written = []
     monkeypatch.setattr(neatlogs_link, "update_card", lambda c, **kw: written.append(kw) or True)
     monkeypatch.setattr(neatlogs_link, "update_fix", lambda *a, **k: True)
+    monkeypatch.setattr(neatlogs_link, "log_report", lambda *a, **k: "r1")
     inc = agent_mod.Incident(signals=[], release="b" * 40, healthy_release="a" * 40, trace_ids=[], id="i")
     m._tell_neatlogs(inc, "diagnosed", root_cause="**Proven**")          # no card yet
     m._tell_neatlogs(inc, "promoted", recommended_action_md="**Shipped**")
@@ -163,3 +164,48 @@ def test_webhook_drops_a_stalled_sender(hook_server):
         started = time.time()
         assert s.recv(200) == b""                                       # the server hung up
         assert time.time() - started < 4
+
+
+def test_without_a_card_medics_account_still_goes_into_neatlogs(monkeypatch):
+    # Live on the first real project: neatlogs makes cards for crashes, and this agent only
+    # answered "Unable to find matching results". Every note sat in Medic as card: false.
+    calls = []
+
+    class Recorder:
+        def connect(self):
+            return self
+
+        def tool(self, name, **kw):
+            calls.append((name, kw))
+            return {"trace_id": "f" * 32}
+    monkeypatch.setattr(neatlogs_link, "Mcp", Recorder)
+    m = Medic.__new__(Medic)
+    m.log = lambda msg: None
+    monkeypatch.setattr(m, "_neatlogs", lambda: object(), raising=False)
+    monkeypatch.setattr(m, "_late_neatlogs_card", lambda inc: None, raising=False)
+    card = {"id": None}
+    monkeypatch.setattr(m, "_card_id", lambda inc: card["id"], raising=False)
+    monkeypatch.setattr(neatlogs_link, "update_card", lambda c, **kw: True)
+    monkeypatch.setattr(neatlogs_link, "update_fix", lambda *a, **k: True)
+    monkeypatch.setattr(agent_mod.paths, "WORKFLOW", "rag-tutorial")
+    inc = agent_mod.Incident(signals=[], release="d" * 40, healthy_release="c" * 40, trace_ids=["t1", "t2"], id="i9")
+    inc.decision = {"cause": "code_regression"}
+    m._tell_neatlogs(inc, "diagnosed code regression; culprit d0f3a972", root_cause="**Proven**: the cutoff")
+    [(name, kw)] = calls
+    assert name == "log_trace" and kw["workflow_name"] == "agent-medic"    # never the app's own workflow
+    assert kw["metadata"]["incident_id"] == "i9" and kw["metadata"]["failing_trace_ids"] == ["t1", "t2"]
+    assert "the cutoff" in kw["output"] and "culprit d0f3a972" in kw["output"]
+    assert inc.neatlogs["notes"][-1]["report"] == "f" * 32
+    card["id"] = "card-1"                                                   # a card exists: it gets the update
+    m._tell_neatlogs(inc, "healed", resolved=True)
+    assert [n for n, _ in calls].count("log_trace") == 1                   # no report needed now
+    assert inc.neatlogs["notes"][-1]["card"] is True
+
+
+def test_a_report_neatlogs_cannot_take_never_breaks_healing(monkeypatch):
+    class Down:
+        def connect(self):
+            raise neatlogs_link.NeatlogsError(503, "mcp Service Temporarily Unavailable")
+    monkeypatch.setattr(neatlogs_link, "Mcp", Down)
+    inc = agent_mod.Incident(signals=[], release="d" * 40, healthy_release="c" * 40, trace_ids=[], id="i10")
+    assert neatlogs_link.log_report(inc, "healed", [], {}, "rag-tutorial") == ""

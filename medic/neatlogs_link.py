@@ -17,6 +17,7 @@ metric rules on tool failure rate and tokens; and, given a public URL, one webho
 import contextlib
 import json
 import os
+import re
 import secrets
 import time
 import uuid
@@ -383,6 +384,41 @@ def update_card(triage_id: str | None, mcp: Mcp | None = None, **sections) -> bo
         return True
     except Exception:  # noqa: BLE001
         return False
+
+
+REPORT_WORKFLOW = "agent-medic"     # Medic's own reports: never mistaken for the app's production traffic
+
+
+def log_report(inc, milestone: str, notes: list[dict], sections: dict, workflow: str,
+               mcp: Mcp | None = None) -> str:
+    """When neatlogs has no fix card for an incident (it makes cards for crashes, not for an agent
+    that quietly answers badly), Medic's account still goes into neatlogs: an incident report
+    trace under its own workflow, carrying the failing traces' IDs. Returns the report's trace id
+    ("" if neatlogs couldn't take it)."""
+    timeline = "\n".join(f"- {time.strftime('%H:%M:%S', time.localtime(n['at']))} {n['text']}" for n in notes)
+    output = "\n\n".join(part for part in (
+        f"**{milestone}**",
+        f"### Timeline\n{timeline}",
+        f"### Root cause\n{sections['root_cause']}" if sections.get("root_cause") else "",
+        f"### Fix\n{sections['recommended_action_md']}" if sections.get("recommended_action_md") else "",
+    ) if part)
+    deploy = inc.deploy or {}
+    pr = (deploy.get("pr") or {}).get("url") or ""
+    try:
+        reply = (mcp or Mcp().connect()).tool(
+            "log_trace", workflow_name=REPORT_WORKFLOW, agent_name="Agent Medic",
+            input=f"incident {inc.id} on '{workflow}': {(inc.triage or {}).get('summary') or 'production degraded'}",
+            output=output[:20000],
+            metadata={"incident_id": inc.id, "app_workflow": workflow, "phase": inc.phase,
+                      "release": (inc.release or "")[:12], "healthy_release": (inc.healthy_release or "")[:12],
+                      "failing_trace_ids": list(inc.trace_ids or [])[:20], "fix_pr": pr,
+                      "cause": (inc.decision or {}).get("cause", "")})
+    except Exception:  # noqa: BLE001 - reporting must never break healing
+        return ""
+    if isinstance(reply, dict):
+        return str(reply.get("trace_id") or reply.get("traceId") or reply.get("id") or "logged")
+    m = re.search(r"[0-9a-f]{32}", str(reply))
+    return m.group(0) if m else ("logged" if reply else "")
 
 
 def update_fix(suggestion_id: str | None, status: str, note: str = "", mcp: Mcp | None = None) -> bool:
