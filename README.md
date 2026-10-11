@@ -1,79 +1,143 @@
-# agent-bisect
+# Agent Medic
 
-`git bisect` for AI agent behavior. Your agent got worse: more failures, higher cost, more
-tool calls. agent-bisect finds the commit that caused it, asks Entire why that commit was
-made, writes a fix that keeps the original intent, and proves the fix by re-running the
-eval and reading the traces back from neatlogs.
+neatlogs finds what broke in your AI agent and why. Medic heals it.
+
+Medic watches a production agent through its neatlogs traces and alerts. When answers start
+failing it does three things:
+
+1. **First aid.** Within minutes, users get answers again: the last known good version of the
+   broken part (a prompt, a retrieval function, a tool) is served from a signed bundle while
+   the cause is found. With armed mode on, the runtime engages it by itself.
+2. **The cure.** Medic finds the commit that caused it (bisection on real traces), reads why
+   that change was made from its Entire checkpoint, writes a fix that keeps that intent and
+   proves it on known-answer questions. The fix arrives as a pull request with the evidence.
+3. **Immunity.** Once the merge is deployed, Medic confirms the heal on production traces of
+   the release that contains it, then removes first aid. If the fix doesn't hold, it opens a
+   revert PR. It writes what it found and did back onto the neatlogs triage card.
 
 ```
-detect ──► bisect ──► explain ──► fix ──► verify ──► commit to fix branch
-  ▲                                          │ rejected: feed back, retry (max 3)
-  └──────────── next regression ◄────────────┘
+neatlogs alert / trace drift ──► first aid (minutes) ──► bisect + Entire intent ──► fix PR
+                                                                                    │ merged
+        revert PR ◄── regressed ── confirm on production traces of the fixed release ◄┘
 ```
 
-## How it works
+## Use it on your agent
 
-1. **Detect.** Run the eval set at the known-good commit and at the current tip. Compare
-   error rate, pass rate, cost per run and tool calls per run. Each metric that moved past
-   its threshold is a regression, investigated one at a time.
-2. **Bisect.** Binary search over the commits between good and bad. Each step checks out a
-   commit in a throwaway git worktree, runs the eval as a subprocess with its own neatlogs
-   session id, then reads that session's traces back through the neatlogs public API
-   (`GET /api/v1/public/traces?sessionId=...`) for cost, tokens and tool calls. A commit is
-   bad when its value is closer to the bad end than the good end, which keeps the search
-   stable under normal LLM noise. Commits that can't be evaluated are skipped, like
-   `git bisect skip`.
-3. **Explain.** For the culprit, read the `Entire-Checkpoint:` trailer and run
-   `entire checkpoint explain` and `entire why <file>:<line>` on the changed lines. That
-   returns the prompt and session that produced the change: what it was trying to do.
-4. **Fix.** Claude gets the culprit diff, the intent from Entire, the current files and the
-   failing eval cases, and returns search-and-replace edits as structured output.
-5. **Verify.** Apply the edits on the fix branch, re-run the eval and accept the fix only if
-   the regressed metric is back near baseline *and* no other metric got worse. Otherwise
-   reset, send the result back to the fixer and try again.
-6. **Repeat.** Detect again on the new tip. When bisecting a later regression, earlier fixes
-   are overlaid on every older commit that contains their culprit, so each regression is
-   isolated even when several overlap in history.
+Your agent is any Python function that answers one question. A RAG app, a support bot, a
+tool-using agent: `answer(question) -> str`.
 
-Every step saves `.bisect/state.json`; `agent-bisect run --resume` continues an
-interrupted run without re-running any evaluation. Fixes go on `agent-bisect/fix-<run>`,
-never on your branch.
+```bash
+pip install "agent-medic @ git+https://github.com/thebhavye/agent-medic.git"
+cd your-app
+agent-medic init               # dry run: shows the diff it would make
+agent-medic init --write
+```
 
-## Quickstart
+`init` reads your code and finds the function that answers questions, the parts it calls on
+the way to the model (retrieval, prompt building, tools) and the settings on that path
+(prompt templates, model names, relevance cutoffs, top-k). It then makes one reviewable change:
+
+- decorators so Medic can swap each part for its last good version: `@medic.entrypoint`,
+  `@medic.surface("retrieve")`, `medic.value("min_relevance", MIN_RELEVANCE)`
+- `neatlogs.init(...)` tagged with the environment and release, if you weren't tracing yet
+- a `medic.toml` with what it found, including your virtualenv and branch
+- `.medic/` in `.gitignore`, and `agent-medic` + `neatlogs` in `requirements.txt`
+
+If your app is a script with no function to call, `init` prints a prompt to give your coding
+agent ("extract an `answer(question)` function from main") and you run it again.
+
+Then:
+
+```bash
+agent-medic evals bootstrap --questions questions.txt   # a new app: a few real questions
+agent-medic evals bootstrap                             # an app with traffic: from healthy traces
+agent-medic neatlogs setup                              # detections + alert rules in your project
+agent-medic watch
+```
+
+Nobody writes tests here. `evals bootstrap` has your current code answer each question twice
+and keeps the facts both answers agree on (names, numbers, quoted terms) as the expected
+answer. A later release that loses them fails the check. Questions whose answers disagree
+are skipped, with the reason, so the checks don't flap.
+
+In production, deploy with `GIT_SHA` set to the commit and `MEDIC_ENV=prod`. To get first aid
+on a remote server, run Medic's dashboard where your production can reach it and point the
+runtime at it:
+
+```bash
+# on Medic's machine
+MEDIC_CONTROL_TOKEN=... MEDIC_RUNTIME_KEY=... agent-medic dashboard --host 0.0.0.0
+# in your production environment
+MEDIC_CONTROL=https://medic.example.com/control/first_aid.json
+MEDIC_STANDBY=https://medic.example.com/control/standby.json      # armed mode
+MEDIC_CONTROL_TOKEN=...   MEDIC_RUNTIME_KEY=...
+```
+
+Bundles are signed with `MEDIC_RUNTIME_KEY` (it is never sent anywhere), bound to one
+release and they expire. They are served only with the fetch token; with no token configured
+the endpoints don't exist. The dashboard speaks plain HTTP, so put TLS in front of it (any
+reverse proxy); the runtime fetches remote bundles over HTTPS only. The runtime is
+standard-library Python; a fetch is capped at 3 seconds and cached for a few seconds, and if
+Medic is unreachable or a bundle doesn't verify, your agent runs as written.
+
+`medic.toml`:
+
+```toml
+[agent]
+entrypoint = "query_data:answer"
+files = ["providers.py", "query_data.py"]
+python = ".venv/Scripts/python.exe"
+
+[neatlogs]
+workflow = "rag-tutorial"
+
+[deploy]
+mode = "pr"          # pr: fixes arrive as pull requests | managed: Medic deploys them itself
+branch = "main"
+```
+
+## What the sponsors' tools do in it
+
+- **neatlogs** is the eyes. Production traces (tagged by release) are what Medic watches,
+  bisects on and confirms the heal with. `neatlogs setup` creates detections and alert rules,
+  a webhook wakes Medic, and Medic reads the alert's sample traces, the triage card and its
+  investigation over the neatlogs MCP, then writes the outcome back on the card.
+- **Entire** is the memory. The culprit commit's checkpoint tells the fixer what the change
+  was for, so the fix keeps the intent (still saves tokens) instead of just reverting it.
+- **cfo.ai** prices it: cost per resolved incident, from the measured runs in
+  [docs/business](docs/business).
+
+## Try it without your own app
+
+The repo includes a production world: a research agent over a knowledge-base API, live
+traffic, and faults to inject.
 
 ```bash
 uv venv && uv pip install -e ".[dev]"
-cp .env.example .env    # ANTHROPIC_API_KEY, NEATLOGS_API_KEY, NEATLOGS_TOKEN, NEATLOGS_PROJECT_ID
-python scripts/seed_history.py            # plant 3 regressions in 10 commits, prints the good sha
-agent-bisect run --good <sha>
-agent-bisect report
+cp .env.example .env            # NEATLOGS_API_KEY, model keys
+agent-medic world init
+agent-medic kb &                # the knowledge-base API
+agent-medic traffic &           # production users
+agent-medic watch &
+agent-medic dashboard           # http://127.0.0.1:8790
+agent-medic world release short-params   # ship a release whose tool schema no longer matches its handler
 ```
 
-No keys yet? `agent-bisect simulate` runs the whole loop offline on a seeded copy of the
-repo: real git, bisection, overlays and verification, with the eval and fixer simulated.
-See [docs/sample-report.html](docs/sample-report.html) for its output.
+`agent-medic world releases` lists the other releases (some harmless, some broken).
 
-Other commands: `status`, `report --html`, `watch` (compare recent production traces in neatlogs and flag
-a regression), `pr` (push the fix branch and open a PR with the report), `clean`.
+[docs/benchmark.md](docs/benchmark.md): 11/11 unattended runs across seven scenarios, from a
+bad release to an upstream API change, an outage and stale data (the last two are escalated
+to a human, since no code fix can repair them).
 
 ## Layout
 
 | Path | What |
 |---|---|
-| `target_agent/` | The test subject: a research agent (Claude + 2 tools) over an offline knowledge base, instrumented with neatlogs |
-| `evals/cases.jsonl` | 8 questions with expected facts |
-| `bisect_agent/orchestrator.py` | The agent loop and its phases |
-| `bisect_agent/search.py` | Bisection with skips and resumable verdicts |
-| `bisect_agent/evaluator.py` | Runs one commit in a worktree, scores it from neatlogs traces |
-| `bisect_agent/entire_ctx.py` | Pulls intent from Entire checkpoints |
-| `bisect_agent/fixer.py` | Claude fix proposals as structured output |
-| `scripts/seed_history.py` | Builds the demo history |
-| `tests/` | Unit tests plus an end-to-end run on a real git history with the LLM faked |
-
-## Planted regressions in the demo
-
-| Commit | Looks like | Actually does | Caught by |
-|---|---|---|---|
-| "Make the agent double-check facts" | a reliability fix | ~2x tool calls and cost | cost |
-| "Shorten tool parameter names to save prompt tokens" | a token optimization | schema says `q`, handler reads `query`: every search fails | errors |
-| "Cap read_doc output to keep the context window small" | a token optimization | cuts every document before its key facts | quality |
+| `medic_runtime/` | Ships inside your agent: entrypoint, surfaces, values, signed bundles, armed mode |
+| `medic/init.py`, `medic/evals.py` | Onboarding: the reviewable diff, known-answer questions from real answers |
+| `medic/agent.py` | The incident loop: triage, investigate, first aid, cure, deliver, monitor |
+| `medic/neatlogs_link.py` | Detections, alert rules, webhook, triage cards and investigations |
+| `medic/delivery.py` | Fix PRs, merge tracking, revert PRs |
+| `medic/runner.py` | Runs any `answer(question)` on a set of questions, traced into neatlogs |
+| `bisect_agent/` | agent-bisect: finds the culprit commit on traces, asks Entire why, writes the fix |
+| `target_agent/` | The demo world's agent |

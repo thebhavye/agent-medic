@@ -3,6 +3,7 @@
 Environment:
     MEDIC_CONTROL          path or http(s) URL of the first-aid bundle (unset: no first aid)
     MEDIC_RELEASE          this process's release sha; a bundle applies only to its own release
+                           (default: GIT_SHA, which also tags the process's neatlogs traces)
     MEDIC_RUNTIME_KEY      shared secret that signs bundles; required for URLs, and when set every
                            bundle must be signed. It is never sent anywhere.
     MEDIC_CONTROL_TOKEN    optional bearer token for fetching a remote bundle (HTTPS, or HTTP to loopback)
@@ -133,7 +134,7 @@ def _load(env: str) -> dict | None:
 
 
 def _release() -> str:
-    return (os.environ.get("MEDIC_RELEASE") or "")[:12]
+    return (os.environ.get("MEDIC_RELEASE") or os.environ.get("GIT_SHA") or "")[:12]
 
 
 def _payload() -> dict | None:
