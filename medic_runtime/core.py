@@ -73,6 +73,12 @@ _log: list = []
 _outcomes: list = []               # [(failed, engaged)] for recent requests
 _local_state: dict = {}            # engagement when no shared state file is configured
 _request = contextvars.ContextVar("medic_request", default=None)
+_last = threading.local()          # the last finished request's stats, per thread (for runners)
+
+
+def last_request() -> dict:
+    """{"tool_calls", "failed", "outage"} of the last request this thread finished."""
+    return dict(getattr(_last, "stats", {}) or {})
 
 
 # -- the bundle ---------------------------------------------------------------------------
@@ -418,6 +424,7 @@ def request():
         raise
     finally:
         _request.reset(token)
+        _last.stats = {"tool_calls": scope["tool_calls"], "failed": scope["failed"], "outage": scope["outage"]}
         try:
             # A request hit by an outage (a dead tool backend, an unavailable model) says nothing
             # about the code: it counts neither for nor against the standby.
@@ -429,6 +436,40 @@ def request():
                 _record_outcome(scope["failed"], scope["engaged"])
         except Exception:  # noqa: BLE001 - judging must never break the agent
             pass
+
+
+def entrypoint(fn):
+    """Mark the function that answers one request (`answer(question) -> str` or a dict with
+    "answer"). Each call becomes one request for the guards and armed mode, and one AGENT span
+    in neatlogs carrying the question and the answer, which is what Medic reads back."""
+    span = None
+    try:
+        import neatlogs
+
+        def _agent(question: str, _run):
+            result = _run()
+            text = result if isinstance(result, str) else (result or {}).get("answer", "") if isinstance(result, dict) \
+                else str(result)
+            return {"answer": text, "_result": result}
+        span = neatlogs.span(kind="AGENT", name=fn.__name__)(_agent)
+    except Exception:  # noqa: BLE001 - without neatlogs the guards still work
+        span = None
+
+    @functools.wraps(fn)
+    def call(*args, **kwargs):
+        question = args[0] if args else next(iter(kwargs.values()), "")
+        with request():
+            if span is not None:
+                out = span(str(question), lambda: fn(*args, **kwargs))
+                result, text = out["_result"], out["answer"]
+            else:
+                result = fn(*args, **kwargs)
+                text = result if isinstance(result, str) else (result or {}).get("answer", "") \
+                    if isinstance(result, dict) else str(result)
+            answer(text or "")
+            return result
+    call.__medic_entrypoint__ = True
+    return call
 
 
 def answer(text: str) -> str:

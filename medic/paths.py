@@ -1,6 +1,7 @@
 """Where Medic keeps things. Everything lives under .medic/ in the project root."""
 
 import os
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -15,3 +16,9 @@ CASES = ROOT / "evals" / "cases.jsonl"
 AGENT_FILES = ["target_agent/agent.py", "target_agent/tools.py"]
 KB_URL = os.environ.get("KB_URL", "http://127.0.0.1:8781")
 WORKFLOW = "research-agent"
+# How Medic runs the agent over a set of questions (python <RUNNER> --cases --out --session --tag).
+# The demo world's runner; a user's project (medic.toml) swaps in medic.runner. See medic/project.py.
+RUNNER = ["-m", "target_agent.run_eval"]
+# The interpreter that runs the agent: the app's own environment (medic.toml [agent] python).
+PYTHON = sys.executable
+PROJECT = None

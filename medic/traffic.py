@@ -27,7 +27,7 @@ def run_batch(size: int, workers: int) -> dict:
     out_file = paths.TRAFFIC / f"batch-{stamp}.json"
     cases_file.write_text("".join(json.dumps(c) + "\n" for c in batch), encoding="utf-8")
     def run_from(code_dir, sha) -> None:
-        cmd = [sys.executable, "-m", "target_agent.run_eval", "--cases", str(cases_file), "--out", str(out_file),
+        cmd = [paths.PYTHON, *paths.RUNNER, "--cases", str(cases_file), "--out", str(out_file),
                "--session", f"prod-{sha[:8]}-{stamp}", "--tag", "env:prod", "--tag", f"release:{sha[:12]}",
                "--workers", str(workers)]
         # Production reads Medic's first-aid bundle; it applies only to the release it was issued for.

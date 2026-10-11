@@ -66,7 +66,8 @@ def cmd_watch(args) -> int:
     def log(message: str) -> None:
         print(f"{time.strftime('%H:%M:%S')} {message}", flush=True)
     medic = Medic(reader, auto_deploy=not args.no_auto_deploy, log=log)
-    print(f"[medic] watching workflow 'research-agent' every {args.interval:.0f}s", flush=True)
+    from medic import paths
+    print(f"[medic] watching workflow '{paths.WORKFLOW}' every {args.interval:.0f}s", flush=True)
     try:
         if args.once:
             medic.tick()
@@ -126,6 +127,52 @@ def cmd_dashboard(args) -> int:
 
     from medic import dashboard, paths
     dashboard.serve(args.port, Path(args.medic_dir) if args.medic_dir else paths.MEDIC_DIR, args.host)
+    return 0
+
+
+def cmd_init(args) -> int:
+    from pathlib import Path
+
+    from medic import init as init_mod
+    root = Path(args.path)
+    plan, edits, proj = init_mod.run(root, workflow=args.workflow, write=args.write, mode=args.mode,
+                                     branch=args.branch)
+    print(init_mod.report(plan))
+    if proj is None:
+        return 1
+    if not args.write:
+        print()
+        print(init_mod.diff(plan, edits) or "(no code changes needed)")
+        print(f"\nmedic.toml would be: entrypoint {proj.entrypoint}, files {', '.join(proj.files)}")
+        print("\nThis was a dry run. Review the diff, then: agent-medic init --write")
+        return 0
+    print(f"\nwrote {len(edits)} file(s) and medic.toml. Next:")
+    print("  1. commit, and deploy with GIT_SHA set to the commit (and MEDIC_ENV=prod) in production")
+    print("  2. agent-medic neatlogs setup        # detections and alert rules in your neatlogs project")
+    print("  3. agent-medic evals bootstrap       # known-answer questions from your healthy traffic")
+    print("  4. agent-medic watch")
+    return 0
+
+
+def cmd_evals(args) -> int:
+    from pathlib import Path
+
+    from medic import evals, paths
+    if args.questions:
+        questions = [q.strip() for q in Path(args.questions).read_text(encoding="utf-8").splitlines() if q.strip()]
+        cases = evals.from_questions(questions)
+        source = f"{len(questions)} questions answered by the current code"
+    else:
+        from bisect_agent.neatlogs_api import NeatlogsReader
+        cases = evals.from_traces(NeatlogsReader(), days=args.days, limit=args.limit)
+        source = f"healthy production traces of '{paths.WORKFLOW}' from the last {args.days} days"
+    if not cases:
+        print(f"no usable known-answer cases from {source}")
+        return 1
+    out = evals.write(cases, Path(paths.CASES))
+    print(f"{len(cases)} known-answer cases from {source} -> {out}")
+    for c in cases[:5]:
+        print(f"  {c['question'][:70]}  expects {', '.join(g[0] for g in c['expect'])}")
     return 0
 
 
@@ -192,6 +239,21 @@ def main() -> int:
     a.add_argument("id")
     a.set_defaults(func=cmd_approve)
 
+    ini = sub.add_parser("init", help="connect your agent to Medic: one reviewable diff and a medic.toml")
+    ini.add_argument("path", nargs="?", default=".")
+    ini.add_argument("--write", action="store_true", help="apply the edits (default: show the diff only)")
+    ini.add_argument("--workflow", help="neatlogs workflow name (default: the folder name)")
+    ini.add_argument("--mode", choices=["pr", "managed"], default="pr", help="pr: fixes arrive as pull requests")
+    ini.add_argument("--branch", default="main")
+    ini.set_defaults(func=cmd_init)
+
+    ev = sub.add_parser("evals", help="known-answer questions from healthy traffic (no tests to write)")
+    ev.add_argument("action", choices=["bootstrap"])
+    ev.add_argument("--questions", help="a file of questions (one per line), for an app without traffic yet")
+    ev.add_argument("--days", type=int, default=7)
+    ev.add_argument("--limit", type=int, default=30)
+    ev.set_defaults(func=cmd_evals)
+
     n = sub.add_parser("neatlogs", help="connect Medic to neatlogs: detections, alert rules, webhook")
     n.add_argument("action", choices=["setup", "status"])
     n.add_argument("--webhook-url", help="public URL of this Medic's /hooks/neatlogs (e.g. the EC2 dashboard)")
@@ -208,6 +270,12 @@ def main() -> int:
     b.set_defaults(func=cmd_bisect)
 
     args = parser.parse_args()
+    # A medic.toml means a user's project: Medic works on that repo instead of its demo world.
+    if args.cmd in ("watch", "neatlogs", "evals", "incidents", "incident", "approve", "dashboard"):
+        from medic import project
+        found = project.find()
+        if found:
+            project.activate(project.load(found))
     return args.func(args)
 
 
