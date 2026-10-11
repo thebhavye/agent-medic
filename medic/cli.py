@@ -122,6 +122,11 @@ def cmd_start(args) -> int:
     if run.get("already"):
         print(f"Medic is already running (pid {run['watch']['pid']}); `agent-medic stop` first to restart it")
         return 0
+    if run.get("failed") is not None:
+        print("Medic stopped right after starting. The end of its log:")
+        for line in run["failed"] or ["(empty)"]:
+            print("  " + line)
+        return 1
     print(f"Medic started in the background (pid {run['watch']['pid']}), log: {run['watch']['log']}")
     if run.get("dashboard"):
         print(f"dashboard: {run['dashboard']['url']}")

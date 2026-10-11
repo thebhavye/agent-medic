@@ -55,3 +55,26 @@ def test_alive_never_harms_the_process_it_asks_about(svc):
     for _ in range(5):
         assert service.alive(pid)                                       # asking doesn't kill it
     service.stop()
+
+
+def test_stop_never_touches_a_recycled_pid(svc, monkeypatch):
+    run = service.start()
+    pid = run["watch"]["pid"]
+    record = service._read()
+    record["watch"]["started_at"] = "another process's start time"     # the pid now belongs to someone else
+    service._run_file().write_text(__import__("json").dumps(record), encoding="utf-8")
+    killed = []
+    monkeypatch.setattr(service, "_kill_tree", killed.append)
+    assert service.stop() == [] and killed == []                        # left alone
+    assert service.alive(pid)
+    monkeypatch.undo()
+    service._kill_tree(pid)
+
+
+def test_a_medic_that_dies_at_once_is_reported(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "MEDIC_DIR", tmp_path / ".medic")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(service, "command", lambda args: [sys.executable, "-c", "print('no medic.toml here'); raise SystemExit(2)"])
+    run = service.start()
+    assert "no medic.toml here" in "\n".join(run["failed"])
+    assert not service.status()["running"]
