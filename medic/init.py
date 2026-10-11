@@ -310,7 +310,8 @@ def build_edits(plan: Plan, workflow: str) -> dict[str, str]:
             lines.insert(index, text_)
         new = "".join(lines)
         ast.parse(new)                      # never propose a file that doesn't parse
-        out[rel] = new
+        if new != text:                     # already connected: nothing to change in this file
+            out[rel] = new
     return out
 
 
@@ -390,8 +391,16 @@ def run(root: Path, workflow: str | None = None, write: bool = False, mode: str 
             edits[".gitignore"] = ignore
         if write:
             for rel, new in edits.items():
-                (root / rel).write_text(new, encoding="utf-8")
+                _write(root / rel, new)
     return plan, edits, proj
+
+
+def _write(path: Path, text: str) -> None:
+    """Write as the file was: a CRLF file stays CRLF, an LF file stays LF (Windows would otherwise
+    turn every line of an LF file into CRLF, a whole-file diff in the user's repo)."""
+    crlf = path.exists() and b"\r\n" in path.read_bytes()
+    with open(path, "w", encoding="utf-8", newline="\r\n" if crlf else "\n") as f:
+        f.write(text)
 
 
 REQUIREMENTS = (("agent-medic", "agent-medic @ git+https://github.com/thebhavye/agent-medic.git"),
