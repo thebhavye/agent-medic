@@ -27,7 +27,7 @@ Your agent is any Python function that answers one question. A RAG app, a suppor
 tool-using agent: `answer(question) -> str`.
 
 ```bash
-pip install "agent-medic @ git+https://github.com/thebhavye/agent-medic.git"
+pipx install "agent-medic @ git+https://github.com/thebhavye/agent-medic.git"   # on your PATH everywhere
 cd your-app
 agent-medic init               # dry run: shows the diff it would make
 agent-medic init --write
@@ -38,7 +38,8 @@ the way to the model (retrieval, prompt building, tools) and the settings on tha
 (prompt templates, model names, relevance cutoffs, top-k). It then makes one reviewable change:
 
 - decorators so Medic can swap each part for its last good version: `@medic.entrypoint`,
-  `@medic.surface("retrieve")`, `medic.value("min_relevance", MIN_RELEVANCE)`
+  `@medic.surface("query_data.retrieve")`, `medic.value("query_data.min_relevance", MIN_RELEVANCE)`
+  (names carry the module, so two modules' `search` never share first aid)
 - `neatlogs.init(...)` tagged with the environment and release, if you weren't tracing yet
 - a `medic.toml` with what it found, including your virtualenv and branch
 - `.medic/` in `.gitignore`, and `agent-medic` + `neatlogs` in `requirements.txt`
@@ -52,13 +53,20 @@ Then:
 agent-medic evals bootstrap --questions questions.txt   # a new app: a few real questions
 agent-medic evals bootstrap                             # an app with traffic: from healthy traces
 agent-medic neatlogs setup                              # detections + alert rules in your project
-agent-medic watch
+agent-medic start --dashboard                           # Medic in the background, dashboard on :8790
+agent-medic status                                      # running? any open incident?
+agent-medic stop                                        # stops everything it started
 ```
 
-Nobody writes tests here. `evals bootstrap` has your current code answer each question twice
-and keeps the facts both answers agree on (names, numbers, quoted terms) as the expected
-answer. A later release that loses them fails the check. Questions whose answers disagree
-are skipped, with the reason, so the checks don't flap.
+Run these from your app's folder. Keys go in your app's `.env` (`NEATLOGS_API_KEY`, the model
+key for Medic's fixer); `agent-medic logs` shows the end of Medic's log, and `agent-medic watch`
+runs it in the foreground instead.
+
+Nobody writes tests here. `evals bootstrap` has your current code answer each question five
+times and keeps the facts every answer agrees on (names, numbers, quoted terms) as the expected
+answer. A later release that loses them fails the check. An open question with several right
+answers ("What does the Caterpillar ask?") accepts any of the answers it gave, so the checks
+don't flap; one whose answers share nothing checkable is skipped, with the reason.
 
 In production, deploy with `GIT_SHA` set to the commit and `MEDIC_ENV=prod`. To get first aid
 on a remote server, run Medic's dashboard where your production can reach it and point the

@@ -16,7 +16,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 
 
 def _repo() -> Path:
@@ -184,7 +184,7 @@ def cmd_clean(args) -> int:
 
 
 def main() -> int:
-    load_dotenv()
+    load_dotenv(find_dotenv(usecwd=True))
     for stream in (sys.stdout, sys.stderr):   # model text can contain any Unicode
         stream.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(prog="agent-bisect")

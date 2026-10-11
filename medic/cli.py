@@ -19,7 +19,7 @@ import argparse
 import json
 import sys
 
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 
 
 def cmd_kb(args) -> int:
@@ -116,6 +116,58 @@ def cmd_approve(args) -> int:
     return 1
 
 
+def cmd_start(args) -> int:
+    from medic import service
+    run = service.start(interval=args.interval, dashboard=args.dashboard, host=args.host)
+    if run.get("already"):
+        print(f"Medic is already running (pid {run['watch']['pid']}); `agent-medic stop` first to restart it")
+        return 0
+    if run.get("failed") is not None:
+        print("Medic stopped right after starting. The end of its log:")
+        for line in run["failed"] or ["(empty)"]:
+            print("  " + line)
+        return 1
+    print(f"Medic started in the background (pid {run['watch']['pid']}), log: {run['watch']['log']}")
+    if run.get("dashboard"):
+        print(f"dashboard: {run['dashboard']['url']}")
+    print("check on it: agent-medic status   |   stop it: agent-medic stop")
+    return 0
+
+
+def cmd_stop(args) -> int:
+    from medic import service
+    stopped = service.stop()
+    print("stopped " + ", ".join(stopped) if stopped else "Medic wasn't running")
+    return 0
+
+
+def cmd_status(args) -> int:
+    import time
+
+    from medic import service
+    st = service.status()
+    if not st["running"]:
+        print("Medic is not running (start it: agent-medic start)")
+    else:
+        since = time.strftime("%H:%M:%S", time.localtime(st["started"])) if st.get("started") else "?"
+        print(f"Medic is running (pid {st['watch']['pid']}, since {since})")
+        if st.get("dashboard"):
+            d = st["dashboard"]
+            print(f"dashboard: {d['url']}" + ("" if d["alive"] else " (stopped)"))
+    for inc in st["open_incidents"]:
+        print(f"open incident {inc['id']}: {inc['phase']}")
+    for line in service.tail(5):
+        print("  " + line)
+    return 0 if st["running"] else 1
+
+
+def cmd_logs(args) -> int:
+    from medic import service
+    lines = service.tail(args.n, "dashboard" if args.dashboard else "watch")
+    print("\n".join(lines) if lines else "no log yet")
+    return 0
+
+
 def cmd_bisect(args) -> int:
     from bisect_agent import cli
     sys.argv = ["agent-medic bisect", *args.rest]
@@ -200,7 +252,7 @@ def cmd_neatlogs(args) -> int:
 
 
 def main() -> int:
-    load_dotenv()
+    load_dotenv(find_dotenv(usecwd=True))   # the project's .env (where the command runs), not Medic's
     for stream in (sys.stdout, sys.stderr):   # model text can contain any Unicode
         stream.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(prog="agent-medic")
@@ -267,13 +319,26 @@ def main() -> int:
     d.add_argument("--medic-dir", default=None, help="a benchmark run under .medic/bench to replay it")
     d.set_defaults(func=cmd_dashboard)
 
+    st = sub.add_parser("start", help="run Medic in the background (watch, and optionally the dashboard)")
+    st.add_argument("--interval", type=float, default=20)
+    st.add_argument("--dashboard", type=int, nargs="?", const=8790, help="also serve the dashboard (port 8790)")
+    st.add_argument("--host", default="127.0.0.1", help="dashboard host; 0.0.0.0 to serve other machines")
+    st.set_defaults(func=cmd_start)
+    sub.add_parser("stop", help="stop the background Medic, and everything it started").set_defaults(func=cmd_stop)
+    sub.add_parser("status", help="is Medic running, and what is it working on").set_defaults(func=cmd_status)
+    lg = sub.add_parser("logs", help="the end of Medic's log")
+    lg.add_argument("-n", type=int, default=40)
+    lg.add_argument("--dashboard", action="store_true", help="the dashboard's log instead")
+    lg.set_defaults(func=cmd_logs)
+
     b = sub.add_parser("bisect", help="agent-bisect: the regression investigator on its own")
     b.add_argument("rest", nargs=argparse.REMAINDER)
     b.set_defaults(func=cmd_bisect)
 
     args = parser.parse_args()
     # A medic.toml means a user's project: Medic works on that repo instead of its demo world.
-    if args.cmd in ("watch", "neatlogs", "evals", "incidents", "incident", "approve", "dashboard"):
+    if args.cmd in ("watch", "neatlogs", "evals", "incidents", "incident", "approve", "dashboard",
+                    "start", "stop", "status", "logs"):
         from medic import project
         found = project.find()
         if found:

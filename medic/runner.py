@@ -89,8 +89,8 @@ def main(argv=None) -> int:
     os.environ["MEDIC_RUNNER"] = "1"        # the project's own neatlogs.init stands down (see medic init)
     sys.path.insert(0, os.getcwd())
     try:
-        from dotenv import load_dotenv
-        load_dotenv()
+        from dotenv import find_dotenv, load_dotenv
+        load_dotenv(find_dotenv(usecwd=True))   # the project's .env
     except ImportError:
         pass
     import neatlogs
