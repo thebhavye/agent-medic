@@ -1,0 +1,6 @@
+# HTTPS for Medic's dashboard, with a certificate Caddy obtains and renews by itself.
+# Replace the host name. No domain? <public-ip>.sslip.io works, e.g. 3.91.10.20.sslip.io
+# Install: sudo cp deploy/project/Caddyfile /etc/caddy/Caddyfile && sudo systemctl reload caddy
+medic.example.com {
+	reverse_proxy 127.0.0.1:8790
+}

@@ -1,0 +1,18 @@
+# Agent Medic's healing loop, kept running and restarted on failure or reboot.
+# Install: sudo cp deploy/project/medic-watch.service /etc/systemd/system/ && sudo systemctl enable --now medic-watch
+[Unit]
+Description=Agent Medic (watch)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ubuntu
+# Your app's checkout: medic.toml and .env live here.
+WorkingDirectory=/home/ubuntu/app
+ExecStart=/home/ubuntu/.local/bin/agent-medic watch
+Restart=always
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
