@@ -39,6 +39,7 @@ def test_follow_ups_count_but_one_rule_is_one_alert_per_read(nl):  # noqa: F811
     fake, api = nl
     state = neatlogs_link.setup(api, log=lambda m: None)
     ours = state["rules"]["tool_failed"]
+    neatlogs_link.save({**neatlogs_link.load(), "alerts_read_until": time.time() - 120})   # watching already
     fake.history[:] = [{"id": "f1", "ruleId": ours, "firedAt": iso(-20), "isFollowup": True},
                        {"id": "f2", "ruleId": ours, "firedAt": iso(-10), "isFollowup": True}]
     assert [a["id"] for a in neatlogs_link.new_alerts(api)] == ["f1"]                  # one alert, merged
@@ -68,6 +69,7 @@ def test_repeats_of_a_rule_keep_every_sample(nl):  # noqa: F811
     fake, api = nl
     state = neatlogs_link.setup(api, log=lambda m: None)
     ours = state["rules"]["tool_failed"]
+    neatlogs_link.save({**neatlogs_link.load(), "alerts_read_until": time.time() - 120})   # watching already
     fake.history[:] = [{"id": "f1", "ruleId": ours, "firedAt": iso(-20), "count": 3, "sampleTraceIds": ["t1", "t2"]},
                        {"id": "f2", "ruleId": ours, "firedAt": iso(-10), "count": 5, "sampleTraceIds": ["t2", "t3"]}]
     [alert] = neatlogs_link.new_alerts(api)

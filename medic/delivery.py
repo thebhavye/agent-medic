@@ -10,6 +10,7 @@ Uses git and the GitHub CLI (gh) with the user's own credentials.
 
 import json
 import re
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -31,14 +32,20 @@ def _run(cmd: list[str], root: Path, check: bool = True) -> str:
     return proc.stdout.strip()
 
 
+NOT_GITHUB = ("gitlab.com", "bitbucket.org", "dev.azure.com", "codeberg.org")
+
+
 def repo(root: Path) -> str:
-    """owner/name of the repo `origin` points to. Every PR goes there, and only there: in a clone
-    of a fork, gh would otherwise default to the upstream project, someone else's repo."""
+    """The repo `origin` points to, as gh's --repo wants it: OWNER/NAME on github.com, HOST/OWNER/NAME
+    on GitHub Enterprise. Every PR goes there, and only there: in a clone of a fork, gh would
+    otherwise default to the upstream project, someone else's repo."""
     url = _run(["git", "remote", "get-url", "origin"], root)
-    m = re.search(r"github\.com[:/]([^/\s]+)/([^/\s]+?)(?:\.git)?/?$", url)
-    if not m:
+    m = (re.match(r"^(?:https?|ssh)://(?:[^@/]+@)?([^/:]+)(?::\d+)?/([^/\s]+)/([^/\s]+?)(?:\.git)?/?$", url)
+         or re.match(r"^(?:[^@/\s]+@)?([^/:\s]+):([^/\s]+)/([^/\s]+?)(?:\.git)?/?$", url))   # git@host:owner/name
+    if not m or m.group(1).lower() in NOT_GITHUB:
         raise DeliveryError(f"origin is not a GitHub repo ({url}); PR delivery needs one")
-    return f"{m.group(1)}/{m.group(2)}"
+    host, owner, name = m.groups()
+    return f"{owner}/{name}" if host.lower() == "github.com" else f"{host}/{owner}/{name}"
 
 
 def fetch(root: Path) -> None:
@@ -96,16 +103,22 @@ def prepare_pr(inc, branch: str, base: str, title: str, out_dir: Path, root: Pat
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"{inc.id}.md"
     path.write_text(body(inc) + "\n", encoding="utf-8")
+    # The title is model-written text: one plain line, and every argument shell-quoted, so pasting
+    # the command can never run anything but git and gh.
+    title = re.sub(r"[\x00-\x1f\x7f]+", " ", title).strip()[:200]
     return {"branch": branch, "base": base, "title": title, "body_file": str(path), "repo": target,
-            "commands": [f"git push origin {branch}",
-                         f'gh pr create --repo {target} --base {base} --head {branch} --title "{title.replace(chr(34), chr(39))}" '
-                         f'--body-file "{path}"']}
+            "commands": [shlex.join(["git", "push", "origin", branch]),
+                         shlex.join(["gh", "pr", "create", "--repo", target, "--base", base, "--head", branch,
+                                     "--title", title, "--body-file", path.as_posix()])]}
 
 
-def existing_pr(branch: str, root: Path) -> str:
-    raw = _run(["gh", "pr", "list", "--repo", repo(root), "--head", branch, "--state", "all", "--json", "url,state", "--limit", "5"], root)
+def existing_pr(branch: str, root: Path, closed: bool = False) -> str:
+    """The PR for `branch`, if there is one: open or merged (with `closed`, a closed one too)."""
+    raw = _run(["gh", "pr", "list", "--repo", repo(root), "--head", branch, "--state", "all",
+                "--json", "url,state", "--limit", "5"], root)
     prs = json.loads(raw or "[]")
-    live = [pr for pr in prs if pr.get("state") in ("OPEN", "MERGED")]
+    wanted = ("OPEN", "MERGED", "CLOSED") if closed else ("OPEN", "MERGED")
+    live = [pr for pr in prs if pr.get("state") in wanted]
     return live[0]["url"] if live else ""
 
 

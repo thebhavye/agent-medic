@@ -215,6 +215,9 @@ def new_alerts(api: Api, state: dict | None = None, since: float | None = None) 
     unseen = [f for f in fires if f.get("ruleId") in ours and f["id"] not in seen]
     # A short overlap with the saved checkpoint (an alert can be recorded a moment after it
     # fired); `since` is a hard floor: nothing from before a fresh world began.
+    if since is None and not state.get("alerts_read_until"):
+        since = now                      # the first read only sets the checkpoint: whatever fired before
+                                         # Medic watched this project is about something else
     cutoff = max(since or 0.0, float(state.get("alerts_read_until") or 0) - 30, now - MAX_ALERT_AGE_S)
     by_rule: dict = {}
     for f in sorted(unseen, key=lambda f: f.get("firedAt", "")):

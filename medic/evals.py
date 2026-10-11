@@ -133,7 +133,7 @@ def _answer(questions: list[str], runs: int) -> dict[str, list[dict]]:
     return {q: by_index.get(f"q{i}", []) for i, q in enumerate(questions)}
 
 
-def from_questions(questions: list[str], log=print, runs: int = 2) -> list[dict]:
+def from_questions(questions: list[str], log=print, runs: int = 3) -> list[dict]:
     """A new app: the current code answers each question `runs` times; the facts its answers agree on
     become the expected facts."""
     by_question = _answer(questions, runs)

@@ -90,6 +90,7 @@ def test_new_alerts_are_ours_unseen_and_not_followups(nl):
     fake, api = nl
     state = neatlogs_link.setup(api, log=lambda m: None)
     ours = state["rules"]["tool_failed"]
+    neatlogs_link.save({**neatlogs_link.load(), "alerts_read_until": time.time() - 120})   # watching already
     fake.history[:] = [
         {"id": "a1", "ruleId": ours, "ruleName": "Medic: tool call failed (3 in 5 min)", "firedAt": iso(-30),
          "count": 4, "threshold": 3, "sampleTraceIds": ["t1", "t2"], "isFollowup": False},
@@ -274,3 +275,14 @@ def test_webhook_only_rings_the_doorbell(tmp_path):
         assert not (tmp_path / "incidents").exists()                         # the body is never acted on
     finally:
         server.shutdown()
+
+
+def test_the_first_read_only_sets_the_checkpoint(nl):
+    # A live bug on the first real project: a project-wide alert that fired 11 minutes before
+    # Medic watched this app opened an incident pinned to the healthy release.
+    fake, api = nl
+    state = neatlogs_link.setup(api, log=lambda m: None)
+    fake.history[:] = [{"id": "before", "ruleId": state["rules"]["tool_failed"], "firedAt": iso(-660),
+                        "sampleTraceIds": []}]
+    assert neatlogs_link.new_alerts(api) == []
+    assert neatlogs_link.load()["alerts_read_until"] > 0

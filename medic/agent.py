@@ -105,10 +105,21 @@ class Medic:
         if api is None:
             return []
         try:
-            return neatlogs_link.new_alerts(api, since=getattr(self, "alerts_since", None))
+            alerts = neatlogs_link.new_alerts(api, since=getattr(self, "alerts_since", None))
         except Exception as exc:  # noqa: BLE001 - neatlogs down: Medic's own signals still work
             self.log(f"[neatlogs] alert history unavailable: {type(exc).__name__}: {exc}")
             return []
+        # Alert rules see the whole neatlogs project, which can hold other agents and other
+        # deployments. An alert counts only if its own sample traces show this deployment failing.
+        mine = []
+        for alert in alerts:
+            samples = self.watcher.evidence_for(alert.get("sampleTraceIds") or [])
+            if samples:
+                mine.append(alert)
+            else:
+                self.log(f"[neatlogs] alert '{alert.get('ruleName')}' ignored: none of its sample traces are "
+                         f"production traces of '{paths.WORKFLOW}' from this repo's releases")
+        return mine
 
     def _attach_alerts(self, inc: Incident, alerts: list[dict]) -> None:
         if not alerts:
@@ -234,7 +245,7 @@ class Medic:
             self.log(f"[medic] runtime armed: last known good of {len(body['functions']) + len(body['values'])} "
                      f"parts from {healthy[:8]}")
         except Exception as exc:  # noqa: BLE001 - arming is best effort; detection still works
-            self.log(f"[medic] could not arm the runtime: {type(exc).__name__}: {exc}")
+            self.log(f"[medic] could not arm the runtime: {type(exc).__name__}: {exc} ({_where(exc)})")
 
     def _recently_escalated(self, signals) -> Incident | None:
         """Don't reopen the same problem every tick while a human handles an escalation: the
@@ -250,7 +261,7 @@ class Medic:
             try:
                 self.tick()
             except Exception as exc:   # keep watching; the failed step is retried next tick
-                self.log(f"[medic] tick failed: {type(exc).__name__}: {exc}")
+                self.log(f"[medic] tick failed: {type(exc).__name__}: {exc} ({_where(exc)})")
             self._sleep(interval)
 
     def _sleep(self, interval: float) -> None:
@@ -471,7 +482,7 @@ class Medic:
             self._open_fix_pr(inc)
             return
         if not self.auto_deploy:
-            if not inc.deploy.get("approved"):
+            if not incidents.approved(inc):
                 return       # waiting for `agent-medic approve <id>`
         if ROLLOUT == "direct":
             self._promote(inc)
@@ -565,7 +576,7 @@ class Medic:
         proj = project.current()
         accepted = next((a for a in reversed(inc.remedy.get("attempts", [])) if a.get("accepted")), {})
         title = f"Medic: {accepted.get('commit_title') or 'fix for incident ' + inc.id}"
-        if proj.pr == "ready" and not inc.deploy.get("approved"):
+        if proj.pr == "ready" and not incidents.approved(inc):
             try:
                 ready = delivery.prepare_pr(inc, inc.remedy["branch"], proj.branch, title, paths.MEDIC_DIR / "prs",
                                             paths.DEPLOY)
@@ -596,20 +607,21 @@ class Medic:
     def do_pr_ready(self, inc: Incident) -> None:
         """The prepared PR waits for the user: `agent-medic approve` has Medic open it; opening it
         by hand with the printed commands works too, and Medic picks it up."""
-        if inc.deploy.get("approved"):
+        if incidents.approved(inc):
             self._open_fix_pr(inc)
             return
         if time.time() - inc.deploy.get("looked_at", 0) < 60:
             return                       # looking on GitHub once a minute is plenty
         inc.deploy["looked_at"] = time.time()
         try:
-            url = delivery.existing_pr(inc.deploy["ready"]["branch"], paths.DEPLOY)
+            # Closed ones too: a PR opened and closed between checks still ends this wait (escalated).
+            url = delivery.existing_pr(inc.deploy["ready"]["branch"], paths.DEPLOY, closed=True)
         except delivery.DeliveryError as exc:
             self.log(f"[medic] could not look for the fix PR: {exc}")
             return
         if url:
             inc.deploy = {**inc.deploy, "pr": {"url": url, "branch": inc.deploy["ready"]["branch"]}}
-            inc.note("remedy", f"fix PR opened by hand: {url}; waiting for it to be merged and deployed", self.log)
+            inc.note("remedy", f"fix PR opened by hand: {url}; following it to merge and deploy", self.log)
             self._tell_neatlogs(inc, f"fix proposed as a pull request: {url}")
             inc.phase = "awaiting_merge"
 
@@ -716,3 +728,12 @@ class Medic:
         inc.note("escalated", note, self.log)
         inc.phase = "escalated"
         self._tell_neatlogs(inc, note)
+
+
+def _where(exc: BaseException) -> str:
+    """Where in Medic an error was raised: the innermost frames of its own code, for the log."""
+    import traceback
+    ours = ("medic", "medic_runtime", "bisect_agent")
+    frames = [f for f in traceback.extract_tb(exc.__traceback__)
+              if os.path.basename(os.path.dirname(f.filename)) in ours]
+    return " <- ".join(f"{os.path.basename(f.filename)}:{f.lineno} {f.name}" for f in reversed(frames[-3:])) or "?"

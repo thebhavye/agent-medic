@@ -92,7 +92,7 @@ def test_from_questions_keeps_only_the_facts_every_answer_agrees_on(tmp_path, mo
     monkeypatch.setattr(evals.subprocess, "run", fake_run)
     monkeypatch.setattr(paths, "DEPLOY", tmp_path)
     skipped = []
-    cases = evals.from_questions(["Who is the White Rabbit late for?", "What is on the bottle?"], log=skipped.append)
+    cases = evals.from_questions(["Who is the White Rabbit late for?", "What is on the bottle?"], log=skipped.append, runs=2)
     assert [c["expect"] for c in cases] == [[["DRINK ME"]]]                # "Queen" only sometimes: dropped
     assert "disagree" in skipped[0]
 

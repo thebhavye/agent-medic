@@ -108,8 +108,7 @@ def cmd_approve(args) -> int:
     from medic import incidents
     for inc in incidents.load_all():
         if inc.id.startswith(args.id) and inc.phase in ("remedied", "pr_ready"):
-            inc.deploy["approved"] = True
-            incidents.save(inc)
+            incidents.approve(inc.id)
             print(f"approved: Medic opens the fix PR for {inc.id} on its next check" if inc.phase == "pr_ready"
                   else f"approved deploy for {inc.id}")
             return 0
@@ -160,7 +159,7 @@ def cmd_evals(args) -> int:
     from medic import evals, paths
     if args.questions:
         questions = [q.strip() for q in Path(args.questions).read_text(encoding="utf-8").splitlines() if q.strip()]
-        cases = evals.from_questions(questions)
+        cases = evals.from_questions(questions, runs=args.runs)
         source = f"{len(questions)} questions answered by the current code"
     else:
         from bisect_agent.neatlogs_api import NeatlogsReader
@@ -253,6 +252,7 @@ def main() -> int:
     ev.add_argument("action", choices=["bootstrap"])
     ev.add_argument("--questions", help="a file of questions (one per line), for an app without traffic yet")
     ev.add_argument("--days", type=int, default=7)
+    ev.add_argument("--runs", type=int, default=3, help="answers per question; only facts every answer states are kept")
     ev.add_argument("--limit", type=int, default=30)
     ev.set_defaults(func=cmd_evals)
 

