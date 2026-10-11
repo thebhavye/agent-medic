@@ -61,13 +61,21 @@ Measured from 12 terminal incidents: 1 live, 10 benchmark, 1 external. Fixer tok
 model usage. Eval tokens in the benchmark runs are **estimated** (characters ÷ 4 of each
 request), because the benchmark's target agent runs a deterministic scripted policy instead
 of a model. The live incident's eval tokens are real. The monitoring cost per agent comes
-mostly from those estimates, so it should be re-measured on a real model before pricing.
+mostly from those estimates.
+
+**Re-measured on a real app (12 October 2026).** One known-answer check on the third-party RAG
+app (6 questions, a real model, tokens read from the LLM spans neatlogs recorded) used **299
+input + 190 output tokens per question**. At a check every 10 minutes that is **$3.24 per agent
+per month on Claude Haiku** (task rates), $11.26 at the as-run rates and $129.46 on Opus. That is
+about a third of the scripted estimate, because this app makes no tool calls. Agents with tools
+and long contexts cost more per question, so measure each customer's checks with neatlogs
+rather than assume one number. Pricing below keeps the conservative $8.61.
 
 | Item | Value |
 |---|---|
 | Cost per healed incident (Claude mix: Haiku checks, Opus fixer) | $0.0288 |
 | Cost per healed incident (all Opus) | $0.2352 |
-| Monitoring per agent per month (Claude mix, check every 10 min) | $8.61 |
+| Monitoring per agent per month (Claude mix, check every 10 min) | $8.61 estimated (scripted agent); $3.24 measured (RAG app) |
 | Monitoring per agent per month (all Opus) | $344.22 |
 | Infrastructure | $15.18 per t3.small instance per month, assumed 10 agents per instance |
 | Support (assumption) | 15 minutes per customer per month at $100/h |
