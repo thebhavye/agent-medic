@@ -172,3 +172,51 @@ def test_remote_bundle_redirects_are_refused(monkeypatch):
     finally:
         server.shutdown()
         medic.reset()
+
+
+def test_short_lived_workers_are_judged_together(armed, monkeypatch):
+    # Live on the first real project: each batch of questions ran in a fresh process, so no
+    # process ever saw three failures and the armed runtime never engaged.
+    publish, tmp = armed
+    publish()
+    for i in range(core.TRIP_FAILURES):
+        medic.reset()                                              # a new worker for every request
+        monkeypatch.setattr(core, "_PROCESS", f"worker-{i}")
+        assert run_request({"query": f"x{i}"}) is None
+    medic.reset()
+    monkeypatch.setattr(core, "_PROCESS", "worker-next")
+    assert run_request({"query": "next worker"}) == "next worker"  # healed across workers
+    assert json.loads((tmp / "state.json").read_text())["b" * 12]["status"] == "engaged"
+
+
+def test_old_shared_outcomes_do_not_trip_it(armed, monkeypatch):
+    publish, tmp = armed
+    publish()
+    for i in range(core.TRIP_FAILURES - 1):
+        medic.reset()
+        monkeypatch.setattr(core, "_PROCESS", f"worker-{i}")
+        run_request({"query": f"x{i}"})
+    later = time.time() + core.OUTCOME_TTL_S + 1                   # those failures are history now
+    monkeypatch.setattr(core.time, "time", lambda: later)
+    medic.reset()
+    assert run_request({"query": "one more"}) is None              # one fresh failure: not a pattern
+    state = tmp / "state.json"                                     # written only when something is decided
+    assert not state.exists() or "status" not in (json.loads(state.read_text()).get("b" * 12) or {})
+
+
+def test_a_workers_outcome_never_erases_an_engagement(armed, monkeypatch):
+    # Review of PR 13: one state file rewritten by every request let a worker that read the file
+    # just before an engagement write its plain outcome over it.
+    publish, tmp = armed
+    publish()
+    for i in range(core.TRIP_FAILURES):
+        monkeypatch.setattr(core, "_PROCESS", f"worker-{i}")
+        medic.reset()
+        run_request({"query": f"x{i}"})
+    engaged = (tmp / "state.json").read_text()
+    assert '"engaged"' in engaged
+    monkeypatch.setattr(core, "_PROCESS", "worker-late")
+    medic.reset()
+    assert run_request({"query": "late"}) == "late"                 # healed, and it recorded an outcome
+    assert (tmp / "state.json").read_text() == engaged               # the state file was not rewritten
+    assert len(list((tmp / "state.json.outcomes").glob("*.json"))) == core.TRIP_FAILURES + 1   # one per worker
