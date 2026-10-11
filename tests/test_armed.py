@@ -172,3 +172,29 @@ def test_remote_bundle_redirects_are_refused(monkeypatch):
     finally:
         server.shutdown()
         medic.reset()
+
+
+def test_short_lived_workers_are_judged_together(armed):
+    # Live on the first real project: each batch of questions ran in a fresh process, so no
+    # process ever saw three failures and the armed runtime never engaged.
+    publish, tmp = armed
+    publish()
+    for i in range(core.TRIP_FAILURES):
+        medic.reset()                                              # a new worker for every request
+        assert run_request({"query": f"x{i}"}) is None
+    medic.reset()
+    assert run_request({"query": "next worker"}) == "next worker"  # healed across workers
+    assert json.loads((tmp / "state.json").read_text())["b" * 12]["status"] == "engaged"
+
+
+def test_old_shared_outcomes_do_not_trip_it(armed, monkeypatch):
+    publish, tmp = armed
+    publish()
+    for i in range(core.TRIP_FAILURES - 1):
+        medic.reset()
+        run_request({"query": f"x{i}"})
+    later = time.time() + core.OUTCOME_TTL_S + 1                   # those failures are history now
+    monkeypatch.setattr(core.time, "time", lambda: later)
+    medic.reset()
+    assert run_request({"query": "one more"}) is None              # one fresh failure: not a pattern
+    assert "status" not in (json.loads((tmp / "state.json").read_text()).get("b" * 12) or {})

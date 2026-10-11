@@ -51,6 +51,7 @@ MODEL_UNAVAILABLE = re.compile(
 # failing in a way code causes. No round trip to Medic: healing takes a few failed requests.
 TRIP_WINDOW = 6           # recent requests the runtime judges
 TRIP_FAILURES = 3         # code-shaped failures among them that engage the standby
+OUTCOME_TTL_S = 600       # a shared outcome older than this is history, not the current pattern
 ENGAGE_TTL_S = 2 * 3600   # an engagement this old is dropped: Medic should have taken over
 NOT_CODE_COOLDOWN_S = 600  # after a standby didn't help, don't try again for this long
 
@@ -267,11 +268,22 @@ def _record_outcome(failed: bool, started_engaged: bool = False) -> None:
         engaged = _engagement()
         if bool(engaged) != started_engaged:
             return                      # crossed the switch
-        with _lock:
-            _outcomes.append((failed, started_engaged))
-            del _outcomes[:-TRIP_WINDOW * 4]
-            window = [f for f, a in _outcomes if a == bool(engaged)][-TRIP_WINDOW:]
         state = _read_state()
+        shared_key = f"outcomes:{_release()}"
+        if _state_path():
+            # Judged with every process on this machine: a short-lived worker (serverless, a
+            # process per request, recycled workers) sees a request or two, never the pattern.
+            now = time.time()
+            shared = [o for o in state.get(shared_key) or [] if now - float(o[2]) < OUTCOME_TTL_S]
+            shared.append([bool(failed), bool(started_engaged), now])
+            state[shared_key] = shared[-TRIP_WINDOW * 4:]
+            window = [bool(f) for f, a, _ in state[shared_key] if bool(a) == bool(engaged)][-TRIP_WINDOW:]
+            _write_state(state)          # recorded even when nothing is decided yet
+        else:
+            with _lock:
+                _outcomes.append((failed, started_engaged))
+                del _outcomes[:-TRIP_WINDOW * 4]
+                window = [f for f, a in _outcomes if a == bool(engaged)][-TRIP_WINDOW:]
         entry = state.get(_release()) or {}
         report = None
         if engaged is None:
@@ -292,6 +304,7 @@ def _record_outcome(failed: bool, started_engaged: bool = False) -> None:
             report = ("released", "the last known good versions did not help; back to the live code")
         if report is None:
             return
+        state[shared_key] = []           # the next judgement starts fresh, on the new side
         _write_state(state)
         with _lock:
             _outcomes.clear()
