@@ -22,9 +22,10 @@ class Check:
     fix: str = ""
 
 
-def _run(cmd: list[str], cwd: Path | None = None, timeout: float = 20) -> subprocess.CompletedProcess | None:
+def _run(cmd: list[str], cwd: Path | None = None, timeout: float = 20,
+         env: dict | None = None) -> subprocess.CompletedProcess | None:
     try:
-        return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+        return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout, env=env)
     except (OSError, subprocess.TimeoutExpired):
         return None
 
@@ -51,7 +52,9 @@ def interpreter(proj) -> Check:
     module, _, func = proj.entrypoint.partition(":")
     code = (f"import sys; sys.path.insert(0, {str(proj.root)!r}); import medic_runtime; "
             f"import importlib; m = importlib.import_module({module!r}); getattr(m, {func!r})")
-    out = _run([exe, "-c", code], cwd=proj.root, timeout=120)
+    # MEDIC_RUNNER=1, as Medic's own runs set it: the app's neatlogs.init stands down, so the
+    # check sends nothing anywhere.
+    out = _run([exe, "-c", code], cwd=proj.root, timeout=120, env={**os.environ, "MEDIC_RUNNER": "1"})
     if out is None or out.returncode != 0:
         tail = ((out.stderr or out.stdout).strip().splitlines() or ["(no output)"])[-1] if out else "did not run"
         return Check("app interpreter", FAIL, f"can't import {proj.entrypoint} with {exe}: {tail}",
