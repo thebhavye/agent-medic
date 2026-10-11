@@ -465,13 +465,15 @@ def _checked_pyproject(text: str):
 
 
 def _gitignore(root: Path) -> str | None:
-    """.gitignore with Medic's working state (incidents, evidence, worktrees) kept out of the user's
-    history; None when it's already there."""
+    """.gitignore with Medic's working state kept out of the user's history: .medic/ (incidents,
+    evidence, worktrees) and .bisect/ (the regression investigator's runs). None when both are."""
     path = root / ".gitignore"
     text = path.read_text(encoding="utf-8") if path.exists() else ""
-    if ".medic/" in {line.strip() for line in text.splitlines()}:
+    have = {line.strip() for line in text.splitlines()}
+    add = [entry for entry in (".medic/", ".bisect/") if entry not in have]
+    if not add:
         return None
-    return text + ("\n" if text and not text.endswith("\n") else "") + ".medic/\n"
+    return text + ("\n" if text and not text.endswith("\n") else "") + "".join(f"{e}\n" for e in add)
 
 
 def _current_branch(root: Path) -> str:

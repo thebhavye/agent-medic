@@ -135,7 +135,7 @@ def test_write_finds_the_apps_venv_and_keeps_medic_state_out_of_git(app):
     (app / "requirements.txt").write_text("openai\n")
     init_mod.run(app, write=True)
     assert tomllib.loads((app / "medic.toml").read_text())["agent"]["python"] == ".venv/bin/python"
-    assert (app / ".gitignore").read_text().splitlines() == ["__pycache__/", ".medic/"]
+    assert (app / ".gitignore").read_text().splitlines() == ["__pycache__/", ".medic/", ".bisect/"]
     assert "agent-medic @ git+https://" in (app / "requirements.txt").read_text()
     init_mod.run(app, write=True)
     assert (app / ".gitignore").read_text().count(".medic/") == 1
