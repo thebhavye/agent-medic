@@ -7,5 +7,7 @@ bench,1010-124422-bdc7,stale_data,dependency_data,escalated,147,18.2990343570709
 bench,1010-160531-4a13,bad_release,code_regression,resolved,8,524.7245864868164,532,1,2306,621,4,32,24341,5718,28
 bench,1010-162113-eed1,truncated_docs,code_regression,resolved,222,464.54459857940674,687,1,2402,804,4,32,36284,7976,29
 bench,1010-163632-f6bf,truncated_docs,code_regression,resolved,191,593.5871558189392,785,1,2430,1022,4,32,36285,7976,29
+bench,1011-002314-73e3,bad_release,code_regression,resolved,78,425.55076718330383,504,3,2558,579,4,32,24340,5718,27
+bench,1011-004719-d4ee,bad_release,code_regression,resolved,141,558.9847011566162,700,1,2198,594,4,32,24340,5718,27
 external,ext-1010-122156,neatlogs-gemini,provider_model_retired,done,,,,3,11755,3046,0,0,0,0,
 live,1010-095908-9d3c,,dependency_contract,resolved,,2038.4215488433838,,1,1794,1290,2,20,38095,9411,28

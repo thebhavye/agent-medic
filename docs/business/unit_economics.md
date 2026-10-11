@@ -1,20 +1,20 @@
 # Agent Medic unit economics
 
-Source: `.medic` - 10 terminal incidents (1 live, 8 bench, 1 external).
+Source: `.medic` - 12 terminal incidents (1 live, 10 bench, 1 external).
 Raw rows: `measured.csv`.
 
 ## 1. Measured per incident
 
-- Fixer tokens: median 3,128, p90 5,221.
-- Eval tokens: median 37,160, p90 47,506.
-- Time to detect (fault injection -> incident open; bench runs only): median 130s, p90 344s.
-- Time to resolve from incident open: median 350s, p90 2,038s.
-- Time to resolve from fault injection (bench runs only): median 465s, p90 785s.
-- Fix attempts: median 1.0, p90 1.0.
+- Fixer tokens: median 3,110, p90 5,221.
+- Eval tokens: median 30,058, p90 47,506.
+- Time to detect (fault injection -> incident open; bench runs only): median 127s, p90 222s.
+- Time to resolve from incident open: median 426s, p90 594s.
+- Time to resolve from fault injection (bench runs only): median 518s, p90 700s.
+- Fix attempts: median 1.0, p90 3.0.
 
 | cause | n | median fixer tok | median eval tok | median detect | median resolve (open) | median resolve (fault) |
 |---|---|---|---|---|---|---|
-| code_regression | 5 | 3,206 | 44,261 | 191s | 465s | 664s |
+| code_regression | 7 | 3,137 | 44,260 | 141s | 465s | 664s |
 | dependency_contract | 2 | 3,128 | 33,362 | 48s | 1,194s | 398s |
 | dependency_data | 1 | 0 | 12,082 | 147s | 18s | 165s |
 | dependency_outage | 1 | 0 | 8,724 | 113s | 74s | 187s |
@@ -22,7 +22,7 @@ Raw rows: `measured.csv`.
 
 ## 2. Cost per incident at three price points
 
-Median incident: 2,138 fixer input + 913 fixer output tokens, 30,312 eval input + 6,847 eval output tokens. Each stream takes its median independently; the four medians need not come from one incident.
+Median incident: 2,252 fixer input + 722 fixer output tokens, 24,340 eval input + 5,718 eval output tokens. Each stream takes its median independently; the four medians need not come from one incident.
 
 | price table (USD per M tokens) | input | output | source |
 |---|---|---|---|
@@ -33,19 +33,19 @@ Median incident: 2,138 fixer input + 913 fixer output tokens, 30,312 eval input 
 
 | price point | per incident |
 |---|---|
-| As run | $0.0075 |
-| Claude mix (Haiku evals, Opus fixer) | $0.0333 |
-| All Opus | $0.2850 |
+| As run | $0.0064 |
+| Claude mix (Haiku evals, Opus fixer) | $0.0288 |
+| All Opus | $0.2352 |
 
 ## 3. Monitoring overhead per watched agent per month
 
-Canary every 10 minutes, 8 cases per run. Measured mean per eval case: 1,413 input + 260 output tokens.
+Canary every 10 minutes, 8 cases per run. Measured mean per eval case: 1,275 input + 243 output tokens.
 
 | price point | canary runs/mo | canary cost/mo |
 |---|---|---|
-| As run | 4,320 | $7.58 |
-| Claude mix (Haiku evals, Opus fixer) | 4,320 | $9.38 |
-| All Opus | 4,320 | $375.29 |
+| As run | 4,320 | $6.93 |
+| Claude mix (Haiku evals, Opus fixer) | 4,320 | $8.61 |
+| All Opus | 4,320 | $344.22 |
 
 neatlogs reads for monitoring are not in the token math above; the watcher polls the trace list continuously (assumption: negligible API cost next to model tokens).
 
