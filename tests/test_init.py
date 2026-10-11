@@ -3,11 +3,11 @@
 import ast
 import importlib
 import sys
-import tomllib
 
 import pytest
 
 from medic import init as init_mod
+from medic.project import tomllib     # tomli on Python 3.10
 
 CHAT = '''"""A docs chatbot."""
 import os
