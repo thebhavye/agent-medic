@@ -39,7 +39,7 @@ def facts(answer: str, question: str = "") -> list[list[str]]:
     out = []
     for kind in (NUMBER, QUOTED, EMPHASIS, NAME):
         for m in kind.finditer(answer):
-            text = (next(g for g in m.groups() if g) if m.groups() else m.group(0)).strip(" \"“”'.,;:!")
+            text = (next(g for g in m.groups() if g) if m.groups() else m.group(0)).strip(" \"“”'.,;:!*_")
             if kind is NAME and " " in text and text.split(" ", 1)[0] in STOP:
                 text = text.split(" ", 1)[1]          # "The Queen of Hearts" starts a sentence
             key = text.lower()
@@ -66,13 +66,27 @@ def slug(question: str) -> str:
     return "-".join(words) or "q"
 
 
-def case(question: str, answer: str, others: tuple = ()) -> dict | None:
+def case(question: str, answer: str, others: tuple = (), any_of: bool = False) -> dict | None:
     """A known-answer case, or None. With other answers to the same question, only the facts every
-    answer agrees on are kept: a fact the agent states only sometimes would make a flaky eval."""
+    answer agrees on are required: a fact the agent states only sometimes would make a flaky eval.
+
+    An open question can have several right answers (the Caterpillar asks "Who are you?" and also
+    "What size do you want to be?"). When the answers share no fact but each states one, the case
+    accepts any of them (`any_of`, for answers from the same code: a production answer and today's
+    disagreeing means one is wrong). A release that stops answering still fails it."""
     if not answer or NON_ANSWER.search(answer):
         return None
     expect = [g for g in facts(answer, question)
               if all(_within(g[0].lower(), _plain(o).lower()) for o in others)]
+    if not expect and others and any_of:
+        firsts = []
+        for text in (answer, *others):
+            found = facts(text, question) if text and not NON_ANSWER.search(text) else []
+            if not found:
+                return None            # an answer with nothing checkable: no reliable case
+            if not any(_within(f.lower(), _plain(text).lower()) for f in firsts):
+                firsts.append(found[0][0])
+        expect = [firsts[:6]]          # one group: any of these facts
     if not expect:
         return None                    # nothing checkable: such a case could never fail
     return {"id": slug(question), "question": question, "expect": expect, "source_answer": answer[:400]}
@@ -133,7 +147,7 @@ def _answer(questions: list[str], runs: int) -> dict[str, list[dict]]:
     return {q: by_index.get(f"q{i}", []) for i, q in enumerate(questions)}
 
 
-def from_questions(questions: list[str], log=print, runs: int = 3) -> list[dict]:
+def from_questions(questions: list[str], log=print, runs: int = 5) -> list[dict]:
     """A new app: the current code answers each question `runs` times; the facts its answers agree on
     become the expected facts."""
     by_question = _answer(questions, runs)
@@ -142,7 +156,7 @@ def from_questions(questions: list[str], log=print, runs: int = 3) -> list[dict]
         answers = by_question.get(question, [])
         failed = next((r for r in answers if r.get("status") != "ok"), None)
         texts = [r.get("answer", "") for r in answers]
-        c = case(question, texts[0], tuple(texts[1:])) if answers and not failed else None
+        c = case(question, texts[0], tuple(texts[1:]), any_of=True) if answers and not failed else None
         if c:
             cases.append(c)
             continue

@@ -107,3 +107,17 @@ def test_scoring_matches_whole_facts():
     assert not score({"expect": [["99"]]}, ok) and not score({"expect": [["Ann"]]}, ok)
     assert score({"expect": [["199"], ["Annabelle"]]}, ok)
     assert score({"expect": [["Who are you?"]]}, {"status": "ok", "answer": "It asks: “Who are you?”"})
+
+
+def test_an_open_question_with_several_right_answers_accepts_any():
+    asks = ["The Caterpillar asks Alice, “Who are you?”",
+            "It asks her “What size do you want to be?”",
+            "The Caterpillar asks, “Who are you?”"]
+    c = evals.case("What does the Caterpillar ask Alice?", asks[0], tuple(asks[1:]), any_of=True)
+    assert c["expect"] == [["Who are you?", "What size do you want to be?"]]
+    from medic.runner import score
+    for a in asks:
+        assert score(c, {"status": "ok", "answer": a})                      # every right answer passes
+    assert not score(c, {"status": "ok", "answer": "Unable to find matching results."})
+    assert evals.case("What does the Caterpillar ask Alice?", asks[0], ("I could not find that.",), any_of=True) is None
+    assert evals.case("What does the Caterpillar ask Alice?", asks[0], tuple(asks[1:])) is None   # strict by default

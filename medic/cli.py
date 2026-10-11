@@ -252,7 +252,7 @@ def main() -> int:
     ev.add_argument("action", choices=["bootstrap"])
     ev.add_argument("--questions", help="a file of questions (one per line), for an app without traffic yet")
     ev.add_argument("--days", type=int, default=7)
-    ev.add_argument("--runs", type=int, default=3, help="answers per question; only facts every answer states are kept")
+    ev.add_argument("--runs", type=int, default=5, help="answers per question; only facts every answer states are kept")
     ev.add_argument("--limit", type=int, default=30)
     ev.set_defaults(func=cmd_evals)
 
