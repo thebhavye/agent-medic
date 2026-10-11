@@ -251,6 +251,50 @@ def _changed_since_good(standby: dict) -> list[str]:
     return sorted(changed)
 
 
+_PROCESS = f"{os.getpid()}-{secrets.token_hex(4)}"   # this process's own outcomes file (pids get reused)
+
+
+def _shared_outcomes(failed: bool, started_engaged: bool, since: float) -> list[tuple[bool, bool]]:
+    """Record this request's outcome and return this release's recent outcomes from every process
+    on the machine, oldest first. Each process writes only its own file next to the state file,
+    so no write ever loses another's (one shared file, rewritten by every request, would let a
+    plain outcome overwrite an engagement written a moment before)."""
+    folder = f"{_state_path()}.outcomes"
+    now, release = time.time(), _release()
+    mine = os.path.join(folder, f"{_PROCESS}.json")
+    try:
+        os.makedirs(folder, exist_ok=True)
+        try:
+            with open(mine, encoding="utf-8") as f:
+                own = [o for o in json.load(f) if now - float(o[2]) < OUTCOME_TTL_S]
+        except (OSError, ValueError):
+            own = []
+        own = (own + [[bool(failed), bool(started_engaged), now, release]])[-TRIP_WINDOW * 4:]
+        tmp = f"{mine}.{secrets.token_hex(4)}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(own, f)
+        os.replace(tmp, mine)
+        names = os.listdir(folder)
+    except OSError:
+        return [(bool(failed), bool(started_engaged))]
+    seen = []
+    for name in names:
+        path = os.path.join(folder, name)
+        if not name.endswith(".json"):
+            continue
+        try:
+            if now - os.path.getmtime(path) > OUTCOME_TTL_S:
+                os.remove(path)              # a worker long gone
+                continue
+            with open(path, encoding="utf-8") as f:
+                seen += [o for o in json.load(f)
+                         if len(o) == 4 and o[3] == release and float(o[2]) > since
+                         and now - float(o[2]) < OUTCOME_TTL_S]
+        except (OSError, ValueError, TypeError):
+            continue                         # being replaced, or just removed: next time
+    return [(bool(o[0]), bool(o[1])) for o in sorted(seen, key=lambda o: float(o[2]))]
+
+
 def _record_outcome(failed: bool, started_engaged: bool = False) -> None:
     """Judge the last few requests; engage the standby, or give it up if it didn't help.
 
@@ -269,16 +313,12 @@ def _record_outcome(failed: bool, started_engaged: bool = False) -> None:
         if bool(engaged) != started_engaged:
             return                      # crossed the switch
         state = _read_state()
-        shared_key = f"outcomes:{_release()}"
         if _state_path():
             # Judged with every process on this machine: a short-lived worker (serverless, a
             # process per request, recycled workers) sees a request or two, never the pattern.
-            now = time.time()
-            shared = [o for o in state.get(shared_key) or [] if now - float(o[2]) < OUTCOME_TTL_S]
-            shared.append([bool(failed), bool(started_engaged), now])
-            state[shared_key] = shared[-TRIP_WINDOW * 4:]
-            window = [bool(f) for f, a, _ in state[shared_key] if bool(a) == bool(engaged)][-TRIP_WINDOW:]
-            _write_state(state)          # recorded even when nothing is decided yet
+            since = float((state.get(_release()) or {}).get("at") or 0)   # the last decision
+            window = [f for f, a in _shared_outcomes(failed, started_engaged, since)
+                      if a == bool(engaged)][-TRIP_WINDOW:]
         else:
             with _lock:
                 _outcomes.append((failed, started_engaged))
@@ -304,8 +344,7 @@ def _record_outcome(failed: bool, started_engaged: bool = False) -> None:
             report = ("released", "the last known good versions did not help; back to the live code")
         if report is None:
             return
-        state[shared_key] = []           # the next judgement starts fresh, on the new side
-        _write_state(state)
+        _write_state(state)              # its "at" starts the next judgement afresh
         with _lock:
             _outcomes.clear()
     _report("auto", *report)
