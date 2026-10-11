@@ -23,7 +23,8 @@ neatlogs alert / trace drift ──► first aid (minutes) ──► bisect + En
 
 ## Use it on your agent
 
-Step by step, from nothing installed: **[docs/QUICKSTART.md](docs/QUICKSTART.md)**.
+Step by step, from nothing installed: **[docs/QUICKSTART.md](docs/QUICKSTART.md)**. On a server, 24/7, with HTTPS:
+**[docs/DEPLOY.md](docs/DEPLOY.md)**.
 
 Your agent is any Python function that answers one question. A RAG app, a support bot, a
 tool-using agent: `answer(question) -> str`.

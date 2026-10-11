@@ -1,0 +1,19 @@
+# Agent Medic's dashboard, also serving the neatlogs webhook (/hooks/neatlogs) and the signed
+# first-aid bundles (/control/*.json, only with MEDIC_CONTROL_TOKEN). It listens on localhost
+# only: Caddy (deploy/project/Caddyfile) puts HTTPS in front of it.
+# Install: sudo cp deploy/project/medic-dashboard.service /etc/systemd/system/ && sudo systemctl enable --now medic-dashboard
+[Unit]
+Description=Agent Medic (dashboard)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/app
+ExecStart=/home/ubuntu/.local/bin/agent-medic dashboard --host 127.0.0.1 --port 8790
+Restart=always
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
