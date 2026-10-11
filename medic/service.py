@@ -159,6 +159,8 @@ def start(interval: float = 20, dashboard: int | None = None, host: str = "127.0
     for _ in range(STARTUP_CHECK_S * 10):
         if not alive(pid):
             run["failed"] = tail(15)
+            if ours(run.get("dashboard")):
+                _kill_tree(run["dashboard"]["pid"])     # nothing would track it once the record is gone
             _run_file().unlink()
             break
         time.sleep(0.1)

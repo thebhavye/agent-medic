@@ -78,3 +78,17 @@ def test_a_medic_that_dies_at_once_is_reported(tmp_path, monkeypatch):
     run = service.start()
     assert "no medic.toml here" in "\n".join(run["failed"])
     assert not service.status()["running"]
+
+
+def test_a_failed_start_leaves_no_dashboard_behind(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "MEDIC_DIR", tmp_path / ".medic")
+    monkeypatch.chdir(tmp_path)
+
+    def command(args):
+        if args[0] == "dashboard":                                      # the dashboard would run on
+            return [sys.executable, "-c", "import time; time.sleep(120)"]
+        return [sys.executable, "-c", "raise SystemExit('bad config')"]
+    monkeypatch.setattr(service, "command", command)
+    run = service.start(dashboard=8799)
+    assert run["failed"] is not None
+    assert wait_for(lambda: not service.alive(run["dashboard"]["pid"]))  # stopped with it
