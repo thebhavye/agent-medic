@@ -197,3 +197,23 @@ def test_only_dependency_failures_open_the_shared_breaker(control, exc, opens):
             medic.guard_tool("read_doc", {}, lambda: "ok")
     else:
         assert medic.guard_tool("read_doc", {}, lambda: "ok") == "ok"
+
+
+def test_the_deploys_git_sha_is_the_release(monkeypatch):
+    monkeypatch.delenv("MEDIC_RELEASE", raising=False)
+    monkeypatch.setenv("GIT_SHA", "c" * 40)                     # what `agent-medic init` asks deploys to set
+    assert core._release() == "c" * 12
+    monkeypatch.setenv("MEDIC_RELEASE", "d" * 12)
+    assert core._release() == "d" * 12
+
+
+def test_an_async_entrypoint_is_awaited_inside_its_request():
+    import asyncio
+
+    @medic.entrypoint
+    async def answer(question):
+        await asyncio.sleep(0)
+        assert core._request.get() is not None                         # still inside the request
+        return "The plant is in Narvik."
+    assert asyncio.run(answer("where?")) == "The plant is in Narvik."
+    assert medic.last_request()["failed"] is False

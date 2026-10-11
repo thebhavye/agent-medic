@@ -3,6 +3,7 @@
 Environment:
     MEDIC_CONTROL          path or http(s) URL of the first-aid bundle (unset: no first aid)
     MEDIC_RELEASE          this process's release sha; a bundle applies only to its own release
+                           (default: GIT_SHA, which also tags the process's neatlogs traces)
     MEDIC_RUNTIME_KEY      shared secret that signs bundles; required for URLs, and when set every
                            bundle must be signed. It is never sent anywhere.
     MEDIC_CONTROL_TOKEN    optional bearer token for fetching a remote bundle (HTTPS, or HTTP to loopback)
@@ -73,6 +74,12 @@ _log: list = []
 _outcomes: list = []               # [(failed, engaged)] for recent requests
 _local_state: dict = {}            # engagement when no shared state file is configured
 _request = contextvars.ContextVar("medic_request", default=None)
+_last = threading.local()          # the last finished request's stats, per thread (for runners)
+
+
+def last_request() -> dict:
+    """{"tool_calls", "failed", "outage"} of the last request this thread finished."""
+    return dict(getattr(_last, "stats", {}) or {})
 
 
 # -- the bundle ---------------------------------------------------------------------------
@@ -127,7 +134,7 @@ def _load(env: str) -> dict | None:
 
 
 def _release() -> str:
-    return (os.environ.get("MEDIC_RELEASE") or "")[:12]
+    return (os.environ.get("MEDIC_RELEASE") or os.environ.get("GIT_SHA") or "")[:12]
 
 
 def _payload() -> dict | None:
@@ -401,7 +408,18 @@ def value(name: str, default):
 @contextlib.contextmanager
 def request():
     """One agent request: the scope for the loop guard, for reporting each fix once, and the
-    unit armed mode judges (did this request fail the way code makes requests fail?)."""
+    unit armed mode judges (did this request fail the way code makes requests fail?).
+
+    Inside an open request (Medic's runner opens one per question, around the entrypoint and any
+    async work it hands back) it joins that request instead of starting another."""
+    outer = _request.get()
+    if outer is not None:
+        try:
+            yield
+        except Exception as exc:
+            outer["outage" if dependency_down(exc) else "failed"] = True
+            raise
+        return
     scope = {"calls": {}, "reported": set(), "failed": False, "outage": False, "tool_calls": 0,
              "engaged": _engagement() is not None if _standby() else False}
     token = _request.set(scope)
@@ -418,6 +436,7 @@ def request():
         raise
     finally:
         _request.reset(token)
+        _last.stats = {"tool_calls": scope["tool_calls"], "failed": scope["failed"], "outage": scope["outage"]}
         try:
             # A request hit by an outage (a dead tool backend, an unavailable model) says nothing
             # about the code: it counts neither for nor against the standby.
@@ -429,6 +448,66 @@ def request():
                 _record_outcome(scope["failed"], scope["engaged"])
         except Exception:  # noqa: BLE001 - judging must never break the agent
             pass
+
+
+def entrypoint(fn):
+    """Mark the function that answers one request (`answer(question) -> str` or a dict with
+    "answer"). Each call becomes one request for the guards and armed mode, and one AGENT span
+    in neatlogs carrying the question and the answer, which is what Medic reads back."""
+    is_async = inspect.iscoroutinefunction(fn)
+    span = None
+    try:
+        import neatlogs
+
+        if is_async:
+            async def _agent(question: str, _run):
+                result = await _run()
+                return {"answer": _answer_text(result), "_result": result}
+        else:
+            def _agent(question: str, _run):
+                result = _run()
+                return {"answer": _answer_text(result), "_result": result}
+        span = neatlogs.span(kind="AGENT", name=fn.__name__)(_agent)
+    except Exception:  # noqa: BLE001 - without neatlogs the guards still work
+        span = None
+
+    def _question(args, kwargs):
+        return str(args[0] if args else next(iter(kwargs.values()), ""))
+
+    if is_async:                         # the request stays open until the answer exists
+        @functools.wraps(fn)
+        async def call(*args, **kwargs):
+            with request():
+                if span is not None:
+                    out = await span(_question(args, kwargs), lambda: fn(*args, **kwargs))
+                    result, text = out["_result"], out["answer"]
+                else:
+                    result = await fn(*args, **kwargs)
+                    text = _answer_text(result)
+                answer(text or "")
+                return result
+    else:
+        @functools.wraps(fn)
+        def call(*args, **kwargs):
+            with request():
+                if span is not None:
+                    out = span(_question(args, kwargs), lambda: fn(*args, **kwargs))
+                    result, text = out["_result"], out["answer"]
+                else:
+                    result = fn(*args, **kwargs)
+                    text = _answer_text(result)
+                answer(text or "")
+                return result
+    call.__medic_entrypoint__ = True
+    return call
+
+
+def _answer_text(result) -> str:
+    if isinstance(result, str):
+        return result
+    if isinstance(result, dict):
+        return str(result.get("answer") or "")
+    return str(result or "")
 
 
 def answer(text: str) -> str:

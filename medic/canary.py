@@ -32,7 +32,7 @@ def evaluate(code_dir: Path, sha: str, first_aid: Path | None = None, tag: str =
     dropped. Pass `first_aid` to judge the release *with* that bundle applied instead."""
     out = paths.MEDIC_DIR / "canary" / f"{time.strftime('%Y%m%d-%H%M%S')}-{sha[:8]}-{tag}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
-    cmd = [sys.executable, "-m", "target_agent.run_eval", "--cases", str(paths.CASES), "--out", str(out),
+    cmd = [paths.PYTHON, *paths.RUNNER, "--cases", str(paths.CASES), "--out", str(out),
            "--session", f"{tag}-{sha[:8]}-{out.stem}", "--tag", tag, "--tag", f"release:{sha[:12]}"]
     env = {k: v for k, v in os.environ.items()
            if k not in ("MEDIC_CONTROL", "MEDIC_RELEASE", "MEDIC_STANDBY", "MEDIC_RUNTIME_STATE")}

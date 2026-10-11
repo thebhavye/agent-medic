@@ -60,7 +60,9 @@ class Evaluator:
         self.state.log(f"evaluating {key}", session=session)
 
         with neatlogs.trace(f"evaluate:{key}", kind="CHAIN", eval_key=key, eval_session=session):
-            cmd = [sys.executable, "-m", "target_agent.run_eval", "--cases", str(self.cases),
+            # The agent runner: the demo agent's, or a project's (MEDIC_RUNNER_ARGS, set by medic.project).
+            runner = json.loads(os.environ.get("MEDIC_RUNNER_ARGS") or '["-m", "target_agent.run_eval"]')
+            cmd = [os.environ.get("MEDIC_PYTHON") or sys.executable, *runner, "--cases", str(self.cases),
                    "--out", str(out), "--session", session,
                    "--tag", f"run:{self.state.run_id}", "--tag", f"eval:{key}"]
             env = {**os.environ, "PYTHONPATH": str(path)}
