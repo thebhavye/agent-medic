@@ -113,10 +113,24 @@ def test_write_applies_it_and_the_patched_app_still_answers(app, monkeypatch):
 
 def test_running_init_twice_changes_nothing_more(app):
     init_mod.run(app, write=True)
-    snapshot = {p: p.read_text() for p in app.rglob("*.py")}
-    plan, edits, _ = init_mod.run(app, write=False)
-    assert all(edits[rel] == (app / rel).read_text() for rel in edits)
-    assert snapshot == {p: p.read_text() for p in app.rglob("*.py")}
+    snapshot = {p: p.read_bytes() for p in app.rglob("*") if p.is_file()}
+    plan, edits, _ = init_mod.run(app, write=True)
+    assert edits == {}                                                    # already connected: nothing to do
+    assert snapshot == {p: p.read_bytes() for p in app.rglob("*") if p.is_file()}   # not a byte rewritten
+
+
+@pytest.mark.parametrize("newline", ["LF", "CRLF"])
+def test_write_keeps_each_files_line_endings(app, newline):
+    eol = b"\r\n" if newline == "CRLF" else b"\n"
+    for rel in ("app/chat.py", "app/retrieve.py"):
+        path = app / rel
+        path.write_bytes(eol.join(path.read_bytes().splitlines()) + eol)
+    init_mod.run(app, write=True)
+    for rel in ("app/chat.py", "app/retrieve.py"):
+        raw = (app / rel).read_bytes()
+        assert b"medic" in raw
+        lines = raw.count(b"\n")
+        assert raw.count(b"\r\n") == (lines if newline == "CRLF" else 0)   # every line kept as it was
 
 
 def test_no_entrypoint_is_said_plainly(tmp_path):
@@ -135,7 +149,7 @@ def test_write_finds_the_apps_venv_and_keeps_medic_state_out_of_git(app):
     (app / "requirements.txt").write_text("openai\n")
     init_mod.run(app, write=True)
     assert tomllib.loads((app / "medic.toml").read_text())["agent"]["python"] == ".venv/bin/python"
-    assert (app / ".gitignore").read_text().splitlines() == ["__pycache__/", ".medic/"]
+    assert (app / ".gitignore").read_text().splitlines() == ["__pycache__/", ".medic/", ".bisect/"]
     assert "agent-medic @ git+https://" in (app / "requirements.txt").read_text()
     init_mod.run(app, write=True)
     assert (app / ".gitignore").read_text().count(".medic/") == 1

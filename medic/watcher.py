@@ -111,8 +111,13 @@ class Watcher:
         """Evidence for specific traces (an alert's samples), in the given order: from what the
         watcher already read, else fetched from neatlogs. Only finalized production traces of
         this deployment; the rolling window is left alone."""
+        return self.read_samples(trace_ids)[0]
+
+    def read_samples(self, trace_ids: list[str]) -> tuple[list[evidence.TraceEvidence], list[str]]:
+        """(evidence of the samples that are this deployment's production traces, ids that couldn't
+        be read yet). A sample that couldn't be read says nothing about whose it is."""
         known = {e.trace_id: e for e in self.all_evidence()}
-        out = []
+        out, unread = [], []
         for trace_id in dict.fromkeys(trace_ids):
             if trace_id in known:
                 out.append(known[trace_id])
@@ -120,12 +125,14 @@ class Watcher:
             try:
                 trace = self.reader._get(f"/traces/{trace_id}")
                 trace = trace.get("trace", trace)
-                if (trace.get("finalizationStatus") == "finalized" and "env:prod" in (trace.get("tags") or [])
-                        and self._ours(trace["tags"])):
+                if trace.get("finalizationStatus") != "finalized":
+                    unread.append(trace_id)          # still arriving: can't tell yet
+                elif "env:prod" in (trace.get("tags") or []) and self._ours(trace["tags"]):
                     out.append(evidence.collect(self.reader, trace))
-            except Exception as exc:  # noqa: BLE001 - a sample we can't read is skipped, not fatal
+            except Exception as exc:  # noqa: BLE001 - a sample we can't read is retried, not fatal
+                unread.append(trace_id)
                 self.log(f"[medic] could not read alert sample {trace_id[:8]}: {type(exc).__name__}")
-        return out
+        return out, unread
 
     def _ours(self, tags: list[str]) -> bool:
         """Only traces from releases in this deployment's history (not an earlier deployment's)."""
@@ -174,8 +181,13 @@ class Watcher:
         if len(recent) < RECENT:
             return [], {}
         current = evidence.window(recent)
+        aided = any(e.first_aid for e in recent)
         if self.state["baseline"] is None:
-            if current["failure_rate"] <= HEALTHY_FAILURE_RATE:
+            # Never learn "healthy" from a bandage: traces first aid answered (a runtime that was
+            # armed before this Medic started heals a broken release by itself) look healthy but
+            # aren't the code's own, and a window spanning releases says nothing about either.
+            if (current["failure_rate"] <= HEALTHY_FAILURE_RATE and not aided and first_aid.active() is None
+                    and len(current["releases"]) == 1):
                 self.state["baseline"] = current
                 self.state["contract"] = contract.snapshot(paths.KB_URL, [e.question for e in recent])
                 self.state["healthy_release"] = recent[-1].release
@@ -187,7 +199,6 @@ class Watcher:
         # Under first aid a broken release looks healthy: its traces are the bandage's, not its own.
         # Judge by the traces themselves (an expired bundle leaves aided traces behind), and by
         # whether a bundle is live now (an aided trace may not show its span yet).
-        aided = any(e.first_aid for e in recent)
         if (not signals and len(current["releases"]) == 1 and not aided and first_aid.active() is None
                 and self._answers_verified(current["releases"][0])):
             self.state["healthy_release"] = current["releases"][0]

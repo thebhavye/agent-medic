@@ -310,7 +310,8 @@ def build_edits(plan: Plan, workflow: str) -> dict[str, str]:
             lines.insert(index, text_)
         new = "".join(lines)
         ast.parse(new)                      # never propose a file that doesn't parse
-        out[rel] = new
+        if new != text:                     # already connected: nothing to change in this file
+            out[rel] = new
     return out
 
 
@@ -362,7 +363,8 @@ def report(plan: Plan) -> str:
     return "\n".join(lines)
 
 
-def run(root: Path, workflow: str | None = None, write: bool = False, mode: str = "pr", branch: str | None = None):
+def run(root: Path, workflow: str | None = None, write: bool = False, mode: str = "pr", branch: str | None = None,
+        pr: str = "open"):
     """Scan, propose, and (with write) apply. Returns (plan, edits, project); `edits` holds every
     file init would change (code, medic.toml, dependencies, .gitignore), so a dry run shows it all."""
     root = root.resolve()
@@ -374,7 +376,8 @@ def run(root: Path, workflow: str | None = None, write: bool = False, mode: str 
     if plan.entrypoint is not None:
         files = sorted({plan.entrypoint.file, *(f.file for f in plan.surfaces), *(r for r, _, _ in plan.values)})
         proj = project_mod.Project(root=root, entrypoint=f"{_module(plan.entrypoint.file)}:{plan.entrypoint.name}",
-                                   files=files, workflow=workflow, mode=mode, branch=branch, python=_venv_python(root))
+                                   files=files, workflow=workflow, mode=mode, branch=branch, pr=pr,
+                                   python=_venv_python(root))
         if not (root / project_mod.FILE).exists():       # an existing medic.toml is the user's: kept
             edits[project_mod.FILE] = project_mod.render(proj)
         deps = _dependencies(root)
@@ -388,8 +391,16 @@ def run(root: Path, workflow: str | None = None, write: bool = False, mode: str 
             edits[".gitignore"] = ignore
         if write:
             for rel, new in edits.items():
-                (root / rel).write_text(new, encoding="utf-8")
+                _write(root / rel, new)
     return plan, edits, proj
+
+
+def _write(path: Path, text: str) -> None:
+    """Write as the file was: a CRLF file stays CRLF, an LF file stays LF (Windows would otherwise
+    turn every line of an LF file into CRLF, a whole-file diff in the user's repo)."""
+    crlf = path.exists() and b"\r\n" in path.read_bytes()
+    with open(path, "w", encoding="utf-8", newline="\r\n" if crlf else "\n") as f:
+        f.write(text)
 
 
 REQUIREMENTS = (("agent-medic", "agent-medic @ git+https://github.com/thebhavye/agent-medic.git"),
@@ -463,13 +474,15 @@ def _checked_pyproject(text: str):
 
 
 def _gitignore(root: Path) -> str | None:
-    """.gitignore with Medic's working state (incidents, evidence, worktrees) kept out of the user's
-    history; None when it's already there."""
+    """.gitignore with Medic's working state kept out of the user's history: .medic/ (incidents,
+    evidence, worktrees) and .bisect/ (the regression investigator's runs). None when both are."""
     path = root / ".gitignore"
     text = path.read_text(encoding="utf-8") if path.exists() else ""
-    if ".medic/" in {line.strip() for line in text.splitlines()}:
+    have = {line.strip() for line in text.splitlines()}
+    add = [entry for entry in (".medic/", ".bisect/") if entry not in have]
+    if not add:
         return None
-    return text + ("\n" if text and not text.endswith("\n") else "") + ".medic/\n"
+    return text + ("\n" if text and not text.endswith("\n") else "") + "".join(f"{e}\n" for e in add)
 
 
 def _current_branch(root: Path) -> str:

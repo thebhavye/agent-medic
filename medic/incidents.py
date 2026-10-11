@@ -10,10 +10,12 @@ import json
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 
 from medic import paths
 
-OPEN_PHASES = ("open", "triaged", "investigated", "decided", "remedied", "canary", "awaiting_merge", "deployed")
+OPEN_PHASES = ("open", "triaged", "investigated", "decided", "remedied", "canary", "pr_ready", "awaiting_merge",
+               "deployed")
 
 
 @dataclass
@@ -50,6 +52,19 @@ def save(inc: Incident) -> None:
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(asdict(inc), indent=1), encoding="utf-8")
     tmp.replace(path)
+
+
+def approve(inc_id: str) -> Path:
+    """Record a human's go-ahead in a file of its own. The running Medic saves the incident on
+    every step, so writing the approval into the incident could be overwritten by its older copy."""
+    path = paths.MEDIC_DIR / "approvals" / inc_id
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(str(time.time()), encoding="utf-8")
+    return path
+
+
+def approved(inc: Incident) -> bool:
+    return bool(inc.deploy.get("approved")) or (paths.MEDIC_DIR / "approvals" / inc.id).exists()
 
 
 def load_all() -> list[Incident]:
