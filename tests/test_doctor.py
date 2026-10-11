@@ -52,3 +52,11 @@ def test_an_app_that_cannot_import_is_a_failure_with_the_reason(tmp_path, bare):
                                          f'python = "{sys.executable.replace(chr(92), "/")}"\n[deploy]\nmode = "managed"\n')
     check = by_name(doctor.run(tmp_path))["app interpreter"]
     assert check.status == doctor.FAIL and "some_missing_dependency" in check.detail
+
+
+def test_a_repository_without_commits_is_a_warning(tmp_path, bare):
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / "app.py").write_text("def answer(question):\n    return 'ok'\n")
+    (tmp_path / "medic.toml").write_text('[agent]\nentrypoint = "app:answer"\n[deploy]\nmode = "managed"\n')
+    check = by_name(doctor.run(tmp_path))["git"]
+    assert check.status == doctor.WARN and "no commits" in check.detail
