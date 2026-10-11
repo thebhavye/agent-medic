@@ -10,6 +10,7 @@ dependencies = [
     "pydantic>=2",
     "python-dotenv>=1.0",
     "openai>=1.40",
+    "tomli>=2; python_version < '3.11'",
 ]
 
 [project.optional-dependencies]

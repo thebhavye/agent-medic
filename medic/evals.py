@@ -78,33 +78,43 @@ def case(question: str, answer: str, others: tuple = ()) -> dict | None:
     return {"id": slug(question), "question": question, "expect": expect, "source_answer": answer[:400]}
 
 
-def from_traces(reader, days: int = 7, limit: int = 30) -> list[dict]:
-    """Healthy production answers: finalized env:prod traces of this workflow that didn't fail."""
+def from_traces(reader, days: int = 7, limit: int = 30, log=print, confirm: bool = True) -> list[dict]:
+    """Healthy production answers: finalized env:prod traces of this workflow that didn't fail.
+
+    Every healthy answer to a question counts. A question production answered only once is asked
+    of the current code once more (`confirm`), so a fact production stated only sometimes doesn't
+    become a required one."""
     from medic import evidence
     since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
     traces = [t for t in reader.list_traces(workflowName=paths.WORKFLOW, **{"from": since})
               if "env:prod" in t.get("tags", []) and t.get("finalizationStatus") == "finalized"
               and str(t.get("status", "")).upper() != "ERROR"]
-    cases, questions = [], set()
+    seen: dict[str, list] = {}          # question -> healthy production evidence, newest first
     for trace in sorted(traces, key=lambda t: t["startedAt"], reverse=True):
-        if len(cases) >= limit:
-            break
         try:
             ev = evidence.collect(reader, trace)
         except Exception:  # noqa: BLE001 - an unreadable trace is skipped
             continue
-        if ev.failed or not ev.question or ev.question in questions:
+        if ev.failed or not ev.question or (ev.question not in seen and len(seen) >= limit):
             continue
-        c = case(ev.question, ev.answer)
+        seen.setdefault(ev.question, []).append(ev)
+    once = [q for q, evs in seen.items() if len(evs) < 2 and case(q, evs[0].answer)]
+    fresh = _answer(once, runs=1) if confirm and once else {}
+    cases = []
+    for question, evs in seen.items():
+        answers = [e.answer for e in evs] + [r.get("answer", "") for r in fresh.get(question, [])
+                                             if r.get("status") == "ok"]
+        c = case(question, answers[0], tuple(answers[1:]))
         if c:
-            questions.add(ev.question)
-            cases.append({**c, "trace_id": ev.trace_id, "release": ev.release})
+            cases.append({**c, "trace_id": evs[0].trace_id, "release": evs[0].release})
+        elif len(answers) > 1 and case(question, answers[0]):
+            log(f"  skipped {question[:60]!r}: the answers disagree: "
+                + " / ".join(repr(a[:60]) for a in answers[:3]))
     return cases
 
 
-def from_questions(questions: list[str], log=print, runs: int = 2) -> list[dict]:
-    """A new app: the current code answers each question `runs` times; the facts its answers agree on
-    become the expected facts."""
+def _answer(questions: list[str], runs: int) -> dict[str, list[dict]]:
+    """The current code's answers: question -> `runs` runner results."""
     with tempfile.TemporaryDirectory() as tmp:
         cases_in = Path(tmp) / "questions.jsonl"
         out = Path(tmp) / "answers.json"
@@ -117,12 +127,19 @@ def from_questions(questions: list[str], log=print, runs: int = 2) -> list[dict]
             raise RuntimeError("the agent produced no answers; check that it runs: "
                                f"{paths.PYTHON} {' '.join(paths.RUNNER)} --cases ... --out ...")
         results = json.loads(out.read_text(encoding="utf-8"))["cases"]
-    by_question = {}
+    by_index: dict[str, list] = {}
     for r in results:
-        by_question.setdefault(r["id"].rsplit("-r", 1)[0], []).append(r)
+        by_index.setdefault(r["id"].rsplit("-r", 1)[0], []).append(r)
+    return {q: by_index.get(f"q{i}", []) for i, q in enumerate(questions)}
+
+
+def from_questions(questions: list[str], log=print, runs: int = 2) -> list[dict]:
+    """A new app: the current code answers each question `runs` times; the facts its answers agree on
+    become the expected facts."""
+    by_question = _answer(questions, runs)
     cases = []
-    for i, question in enumerate(questions):
-        answers = by_question.get(f"q{i}", [])
+    for question in questions:
+        answers = by_question.get(question, [])
         failed = next((r for r in answers if r.get("status") != "ok"), None)
         texts = [r.get("answer", "") for r in answers]
         c = case(question, texts[0], tuple(texts[1:])) if answers and not failed else None

@@ -120,8 +120,38 @@ def test_pr_mode_confirms_the_heal_on_releases_that_contain_the_fix(pr_medic, mo
     traces = [ev(i, "old000000000", failed=True) for i in range(6)] + [ev(10 + i, "new000000000") for i in range(6)]
     m.watcher.all_evidence = lambda: traces
     monkeypatch.setattr(delivery, "contains", lambda root, fix, release: release == "new000000000")
+    canaries = []
+    monkeypatch.setattr(agent_mod.gitops, "rev_parse", lambda rev, root: rev + "0" * 28)
+    monkeypatch.setattr(m, "_release_dir", lambda sha: paths.MEDIC_DIR, raising=False)
+    monkeypatch.setattr(agent_mod, "save_state", lambda state: None)
+    monkeypatch.setattr(agent_mod.canary, "run", lambda state, log, code_dir, sha: canaries.append(sha) or
+                        {"pass_rate": 1.0, "n": 4})
     m.do_monitor(inc)
-    assert inc.phase == "resolved"                                       # judged on the fixed release only
+    assert inc.phase == "resolved" and canaries == ["new000000000" + "0" * 28]   # judged on the fixed release only
+
+
+def test_pr_mode_does_not_call_a_fix_healed_when_its_answers_are_wrong(pr_medic, monkeypatch):
+    from medic.evidence import TraceEvidence
+    m, inc = pr_medic
+    inc.phase, inc.deploy = "deployed", {"mode": "pr", "release": "m" * 40, "at": time.time()}
+    healthy = [TraceEvidence(trace_id=f"t{i}", started_at="2026-10-11T00:00:00Z", release="new000000000",
+                             status="OK", cost_usd=0, tokens=100, tool_calls=2, duration_ms=1, question="q",
+                             answer="Narvik") for i in range(6)]
+    rescued = [TraceEvidence(trace_id=f"r{i}", started_at="2026-10-11T00:00:00Z", release="new000000000",
+                             status="OK", cost_usd=0, tokens=100, tool_calls=2, duration_ms=1, question="q",
+                             answer="Narvik", first_aid=["auto:function:search"]) for i in range(6)]
+    m.watcher.all_evidence = lambda: rescued                             # only first aid kept it working
+    monkeypatch.setattr(delivery, "contains", lambda root, fix, release: True)
+    m.do_monitor(inc)
+    assert inc.phase == "deployed"                                       # no evidence about the cure yet
+    m.watcher.all_evidence = lambda: healthy                             # traffic fine, answers wrong
+    monkeypatch.setattr(agent_mod.gitops, "rev_parse", lambda rev, root: rev)
+    monkeypatch.setattr(m, "_release_dir", lambda sha: paths.MEDIC_DIR, raising=False)
+    monkeypatch.setattr(agent_mod, "save_state", lambda state: None)
+    monkeypatch.setattr(agent_mod.canary, "run", lambda state, log, code_dir, sha: {"pass_rate": 0.25, "n": 4})
+    monkeypatch.setattr(delivery, "revert_pr", lambda *a: {"url": "https://github.com/u/app/pull/9"})
+    m.do_monitor(inc)
+    assert inc.phase == "escalated" and inc.monitor["canary"]["ok"] is False
 
 
 def test_pr_mode_opens_a_revert_pr_if_the_fix_does_not_hold(pr_medic, monkeypatch):
@@ -133,7 +163,8 @@ def test_pr_mode_opens_a_revert_pr_if_the_fix_does_not_hold(pr_medic, monkeypatc
                             answer="") for i in range(6)]
     m.watcher.all_evidence = lambda: traces
     monkeypatch.setattr(delivery, "contains", lambda root, fix, release: True)
-    monkeypatch.setattr(delivery, "revert_pr", lambda inc, merge, base, root, why: {"url": "https://github.com/u/app/pull/8"})
+    monkeypatch.setattr(delivery, "revert_pr", lambda inc, merge, base, root, why, worktrees:
+                        {"url": "https://github.com/u/app/pull/8"})
     m.do_monitor(inc)
     assert inc.phase == "escalated" and inc.deploy["revert_pr"]["url"].endswith("/8")
 
@@ -167,3 +198,75 @@ def test_bundles_are_served_only_with_the_fetch_token(control_server, monkeypatc
     status, body = fetch(control_server + "/control/standby.json", "fetch-secret")
     assert status == 200 and b"good_release" in body
     assert fetch(control_server + "/control/first_aid.json", "fetch-secret")[0] == 404   # none published
+
+
+def test_detection_keeps_running_while_a_fix_waits_for_review(pr_medic, monkeypatch):
+    from medic.watcher import Signal
+    m, inc = pr_medic
+    inc.phase = "awaiting_merge"
+    monkeypatch.setattr(agent_mod.incidents, "open_incidents", lambda: [inc])
+    opened = []
+    m.watcher.poll = lambda: 0
+    m.watcher.recent = lambda: []
+    m.watcher.check = lambda: ([Signal("failure", "failure_rate", 0.0, 0.5)], {})
+    m.step = lambda i: None
+    for name in ("_refresh_standby",):
+        monkeypatch.setattr(m, name, lambda: None, raising=False)
+    monkeypatch.setattr(m, "_neatlogs_alerts", lambda: [], raising=False)
+    monkeypatch.setattr(m, "_attach_alerts", lambda i, a: None, raising=False)
+    monkeypatch.setattr(m, "_recently_escalated", lambda s: None, raising=False)
+    monkeypatch.setattr(m, "open", lambda signals, alerts=None: opened.append(signals), raising=False)
+    monkeypatch.setattr(agent_mod.canary, "due", lambda state: False)
+    monkeypatch.setattr(delivery, "contains", lambda root, fix, release: False)
+    monkeypatch.setattr(m, "_live_release", lambda: "b" * 40, raising=False)
+    m.tick()
+    assert opened == []                     # the broken release it already covers: no second incident
+    monkeypatch.setattr(m, "_live_release", lambda: "c" * 40, raising=False)
+    m.tick()
+    assert len(opened) == 1                 # a different release broke meanwhile: a new incident
+
+
+def test_delivery_errors_are_delivery_errors(tmp_path, monkeypatch):
+    def missing(*a, **kw):
+        raise FileNotFoundError("gh")
+    monkeypatch.setattr(delivery.subprocess, "run", missing)
+    with pytest.raises(delivery.DeliveryError, match="not installed"):
+        delivery.state("https://github.com/u/app/pull/7", tmp_path)
+
+    def slow(*a, **kw):
+        raise subprocess.TimeoutExpired("gh", 300)
+    monkeypatch.setattr(delivery.subprocess, "run", slow)
+    with pytest.raises(delivery.DeliveryError, match="timed out"):
+        delivery.state("https://github.com/u/app/pull/7", tmp_path)
+
+
+def test_a_restart_tracks_the_pr_it_already_opened(tmp_path, monkeypatch):
+    calls = []
+
+    def run(cmd, **kw):
+        calls.append(cmd[:3])
+        out = json.dumps([{"url": "https://github.com/u/app/pull/7", "state": "OPEN"}]) if cmd[:3] == ["gh", "pr", "list"] else ""
+        return SimpleNamespace(returncode=0, stdout=out, stderr="")
+    monkeypatch.setattr(delivery.subprocess, "run", run)
+    inc = Incident(signals=[], release="b" * 40, healthy_release="a" * 40, trace_ids=[], id="inc1")
+    pr = delivery.open_pr(inc, "medic/fix-inc1", "main", tmp_path, "Medic: fix")
+    assert pr["url"].endswith("/7") and ["gh", "pr", "create"] not in calls
+
+
+def test_a_release_deployed_before_medic_fetched_it_is_watched_after_the_fetch(tmp_path, monkeypatch):
+    from medic import watcher as watcher_mod
+    monkeypatch.setattr(paths, "DEPLOY", tmp_path)
+    have = set()
+    fetches = []
+
+    def run(cmd, **kw):
+        if cmd[:2] == ["git", "fetch"]:
+            fetches.append(1)
+            have.add("abc")
+        return SimpleNamespace(returncode=0 if cmd[:2] == ["git", "cat-file"] and cmd[-1].split("^")[0] in have
+                               else 1)
+    monkeypatch.setattr(watcher_mod.subprocess, "run", run)
+    w = watcher_mod.Watcher.__new__(watcher_mod.Watcher)
+    assert w._ours(["release:abc"]) and fetches == [1]
+    assert w._ours(["release:abc"]) and fetches == [1]                    # known now: no more fetching
+    assert not w._ours(["release:zzz"])                                   # unknown and fetched a moment ago

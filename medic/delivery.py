@@ -18,8 +18,13 @@ class DeliveryError(RuntimeError):
 
 
 def _run(cmd: list[str], root: Path, check: bool = True) -> str:
-    proc = subprocess.run(cmd, cwd=root, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                          timeout=300)
+    try:
+        proc = subprocess.run(cmd, cwd=root, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                              timeout=300)
+    except FileNotFoundError:
+        raise DeliveryError(f"{cmd[0]} is not installed (PR delivery needs git and the GitHub CLI, gh)") from None
+    except subprocess.TimeoutExpired:
+        raise DeliveryError(f"{' '.join(cmd[:3])}: timed out after 300s") from None
     if check and proc.returncode != 0:
         raise DeliveryError(f"{' '.join(cmd[:3])}: {(proc.stderr or proc.stdout).strip()[-400:]}")
     return proc.stdout.strip()
@@ -65,9 +70,18 @@ def body(inc) -> str:
 
 def open_pr(inc, branch: str, base: str, root: Path, title: str) -> dict:
     _run(["git", "push", "--quiet", "--force-with-lease", "origin", f"{branch}:{branch}"], root)
-    url = _run(["gh", "pr", "create", "--base", base, "--head", branch, "--title", title,
-                "--body", body(inc)], root).splitlines()[-1].strip()
+    url = existing_pr(branch, root)     # Medic stopped after opening it last time: track that one
+    if not url:
+        url = _run(["gh", "pr", "create", "--base", base, "--head", branch, "--title", title,
+                    "--body", body(inc)], root).splitlines()[-1].strip()
     return {"url": url, "branch": branch, "base": base}
+
+
+def existing_pr(branch: str, root: Path) -> str:
+    raw = _run(["gh", "pr", "list", "--head", branch, "--state", "all", "--json", "url,state", "--limit", "5"], root)
+    prs = json.loads(raw or "[]")
+    live = [pr for pr in prs if pr.get("state") in ("OPEN", "MERGED")]
+    return live[0]["url"] if live else ""
 
 
 def state(url: str, root: Path) -> dict:
@@ -78,10 +92,10 @@ def state(url: str, root: Path) -> dict:
             "merged_at": data.get("mergedAt")}
 
 
-def revert_pr(inc, merge_commit: str, base: str, root: Path, why: str) -> dict:
+def revert_pr(inc, merge_commit: str, base: str, root: Path, why: str, worktrees: Path) -> dict:
     """Open a PR that reverts the merged fix, in a worktree so the user's checkout is untouched."""
     branch = f"medic/revert-{inc.id}"
-    work = root / ".medic" / "worktrees" / f"revert-{inc.id}"
+    work = worktrees / f"revert-{inc.id}"
     fetch(root)
     _run(["git", "worktree", "add", "--force", "-B", branch, str(work), f"origin/{base}"], root)
     try:

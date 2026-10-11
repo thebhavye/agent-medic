@@ -178,12 +178,30 @@ def scan(root: Path) -> Plan:
         if not consts:
             continue
         for name in sorted(consts):
-            loads = [n for f in path_funcs if f.file == rel for n in ast.walk(f.node)
+            loads = [n for f in path_funcs if f.file == rel and name not in _local_names(f.node)
+                     for n in ast.walk(f.node)
                      if isinstance(n, ast.Name) and n.id == name and isinstance(n.ctx, ast.Load)
                      and id(n) not in _already_wrapped(f.node)]
             if loads:
                 plan.values.append((rel, name, loads))
     return plan
+
+
+def _local_names(fn: ast.AST) -> set[str]:
+    """Names a function binds itself (parameters, assignments, loop and with targets, imports):
+    there `MODEL` is the function's own variable, not the module setting."""
+    a = fn.args
+    names = {p.arg for p in [*a.posonlyargs, *a.args, *a.kwonlyargs]}
+    names |= {p.arg for p in (a.vararg, a.kwarg) if p is not None}
+    declared_global = set()
+    for n in ast.walk(fn):
+        if isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store, ast.Del)):
+            names.add(n.id)
+        elif isinstance(n, (ast.Import, ast.ImportFrom)):
+            names |= {(alias.asname or alias.name).split(".")[0] for alias in n.names}
+        elif isinstance(n, (ast.Global, ast.Nonlocal)):
+            declared_global |= set(n.names)
+    return names - declared_global
 
 
 def _already_wrapped(fn: ast.AST) -> set[int]:
@@ -197,14 +215,32 @@ def _already_wrapped(fn: ast.AST) -> set[int]:
 
 # -- edits --------------------------------------------------------------------------------
 
-def _value_name(name: str) -> str:
-    return name.lower()
+def _module(rel: str) -> str:
+    module = rel[:-3].replace("/", ".")
+    return module[: -len(".__init__")] if module.endswith(".__init__") else module
 
 
-def _insert_import(lines: list[str], tree: ast.Module, line: str) -> None:
-    """Add an import after the module's last top-level import (or its docstring)."""
-    if any(existing.strip() == line for existing in lines):
-        return
+def _runtime_name(rel: str, name: str) -> str:
+    """The name a part is registered under: qualified by its module, so two modules' `search`
+    (or two `MODEL` settings) never share first aid."""
+    return f"{_module(rel)}.{name}"
+
+
+def _value_name(rel: str, name: str) -> str:
+    return _runtime_name(rel, name.lower())
+
+
+def _statement_start(tree: ast.Module, lineno: int) -> int:
+    """0-based index of the first line (decorators included) of the top-level statement holding `lineno`."""
+    for node in tree.body:
+        start = min([d.lineno for d in getattr(node, "decorator_list", [])] + [node.lineno])
+        if start <= lineno <= node.end_lineno:
+            return start - 1
+    return lineno - 1
+
+
+def _import_index(tree: ast.Module) -> int:
+    """0-based line index just after the module's top-level imports (or its docstring)."""
     last = 0
     for node in tree.body:
         if isinstance(node, (ast.Import, ast.ImportFrom)):
@@ -214,7 +250,7 @@ def _insert_import(lines: list[str], tree: ast.Module, line: str) -> None:
     if not last and tree.body and isinstance(tree.body[0], ast.Expr) and isinstance(getattr(tree.body[0], "value", None),
                                                                                        ast.Constant):
         last = tree.body[0].end_lineno
-    lines.insert(last, line + "\n")
+    return last
 
 
 NEATLOGS_SNIPPET = '''
@@ -240,30 +276,37 @@ def build_edits(plan: Plan, workflow: str) -> dict[str, str]:
         text = (plan.root / rel).read_text(encoding="utf-8")
         tree = ast.parse(text)
         lines = text.splitlines(keepends=True)
-        # 1. value loads, replaced right to left on each line so columns stay valid
+        # 1. value loads, replaced in place (line count unchanged), right to left so columns stay valid
         loads = sorted(((n.lineno, n.col_offset, n.end_col_offset, name) for r, name, ns in plan.values if r == rel
                         for n in ns), reverse=True)
         for lineno, start, end, name in loads:
             line = lines[lineno - 1]
             if line[start:end] == name:
-                lines[lineno - 1] = line[:start] + f'medic.value("{_value_name(name)}", {name})' + line[end:]
-        # 2. decorators, bottom up so line numbers stay valid
+                lines[lineno - 1] = line[:start] + f'medic.value("{_value_name(rel, name)}", {name})' + line[end:]
+        # 2. new lines, all placed by the original line numbers and inserted bottom up
+        inserts = []                        # (0-based index, text)
         marks = [(plan.entrypoint.node, "@medic.entrypoint")] if plan.entrypoint.file == rel else []
-        marks += [(f.node, f'@medic.surface("{f.name}")') for f in plan.surfaces if f.file == rel]
-        for node, deco in sorted(marks, key=lambda m: -m[0].lineno):
+        marks += [(f.node, f'@medic.surface("{_runtime_name(rel, f.name)}")') for f in plan.surfaces if f.file == rel]
+        tops = []
+        for node, deco in marks:
             top = min([d.lineno for d in node.decorator_list] + [node.lineno])
-            existing = "".join(lines[top - 1:node.lineno])
-            if "medic.entrypoint" in existing or "medic.surface" in existing:
+            if "medic.entrypoint" in "".join(lines[top - 1:node.lineno]) or \
+                    "medic.surface" in "".join(lines[top - 1:node.lineno]):
                 continue
-            lines.insert(top - 1, " " * node.col_offset + deco + "\n")
-        # 3. imports (and neatlogs, once, in the entrypoint's module)
-        _insert_import(lines, tree, "import medic_runtime as medic")
+            tops.append(top - 1)
+            inserts.append((top - 1, " " * node.col_offset + deco + "\n"))
+        present = {line.strip() for line in lines}
+        header = [imp for imp in ("import medic_runtime as medic",) if imp not in present]
         if rel == plan.entrypoint.file and not plan.has_neatlogs_init:
-            _insert_import(lines, tree, "import neatlogs")
-            _insert_import(lines, tree, "import os")
-            wanted = {"import medic_runtime as medic", "import neatlogs", "import os"}
-            last = max(i for i, line in enumerate(lines) if line.strip() in wanted)
-            lines.insert(last + 1, NEATLOGS_SNIPPET.format(workflow=workflow))
+            header += [imp for imp in ("import neatlogs", "import os") if imp not in present]
+            header.append(NEATLOGS_SNIPPET.format(workflow=workflow))
+        if header:
+            # After the imports, but never below a decorator that needs `medic`.
+            at = min([_import_index(tree), *(_statement_start(tree, t + 1) for t in tops)])
+            inserts.append((at, "".join(h if h.endswith("\n") else h + "\n" for h in header)))
+        # Same index: the header goes above the decorator (inserting in reverse keeps that order).
+        for index, text_ in sorted(inserts, key=lambda i: (i[0], i[1].lstrip().startswith("@")), reverse=True):
+            lines.insert(index, text_)
         new = "".join(lines)
         ast.parse(new)                      # never propose a file that doesn't parse
         out[rel] = new
@@ -273,9 +316,11 @@ def build_edits(plan: Plan, workflow: str) -> dict[str, str]:
 def diff(plan: Plan, edits: dict[str, str]) -> str:
     chunks = []
     for rel, new in edits.items():
-        old = (plan.root / rel).read_text(encoding="utf-8")
+        path = plan.root / rel
+        old = path.read_text(encoding="utf-8") if path.exists() else ""
         chunks.append("".join(difflib.unified_diff(old.splitlines(keepends=True), new.splitlines(keepends=True),
-                                                   fromfile=f"a/{rel}", tofile=f"b/{rel}")))
+                                                   fromfile=f"a/{rel}" if path.exists() else "/dev/null",
+                                                   tofile=f"b/{rel}")))
     return "\n".join(c for c in chunks if c)
 
 
@@ -317,7 +362,8 @@ def report(plan: Plan) -> str:
 
 
 def run(root: Path, workflow: str | None = None, write: bool = False, mode: str = "pr", branch: str | None = None):
-    """Scan, propose, and (with write) apply. Returns (plan, edits, project)."""
+    """Scan, propose, and (with write) apply. Returns (plan, edits, project); `edits` holds every
+    file init would change (code, medic.toml, dependencies, .gitignore), so a dry run shows it all."""
     root = root.resolve()
     workflow = workflow or root.name
     branch = branch or _current_branch(root) or "main"
@@ -325,41 +371,83 @@ def run(root: Path, workflow: str | None = None, write: bool = False, mode: str 
     edits = build_edits(plan, workflow)
     proj = None
     if plan.entrypoint is not None:
-        module = plan.entrypoint.file[:-3].replace("/", ".")
         files = sorted({plan.entrypoint.file, *(f.file for f in plan.surfaces), *(r for r, _, _ in plan.values)})
-        proj = project_mod.Project(root=root, entrypoint=f"{module}:{plan.entrypoint.name}", files=files,
-                                   workflow=workflow, mode=mode, branch=branch, python=_venv_python(root))
+        proj = project_mod.Project(root=root, entrypoint=f"{_module(plan.entrypoint.file)}:{plan.entrypoint.name}",
+                                   files=files, workflow=workflow, mode=mode, branch=branch, python=_venv_python(root))
+        if not (root / project_mod.FILE).exists():       # an existing medic.toml is the user's: kept
+            edits[project_mod.FILE] = project_mod.render(proj)
+        deps = _dependencies(root)
+        if deps is None:
+            plan.notes.append("no requirements.txt or pyproject.toml dependencies found: add "
+                              + " and ".join(line for _, line in REQUIREMENTS) + " to your app's dependencies")
+        elif deps:
+            edits[deps[0]] = deps[1]
+        ignore = _gitignore(root)
+        if ignore is not None:
+            edits[".gitignore"] = ignore
         if write:
             for rel, new in edits.items():
                 (root / rel).write_text(new, encoding="utf-8")
-            project_mod.write(proj)
-            _requirements(root)
-            _gitignore(root)
     return plan, edits, proj
-
-
-def _requirements(root: Path) -> None:
-    req = root / "requirements.txt"
-    if not req.exists():
-        return
-    text = req.read_text(encoding="utf-8")
-    names = {re.split(r"[<>=\[ ;]", line.strip(), maxsplit=1)[0].lower() for line in text.splitlines() if line.strip()}
-    add = [line for name, line in REQUIREMENTS if name not in names]
-    if add:
-        req.write_text(text.rstrip("\n") + "\n" + "\n".join(add) + "\n", encoding="utf-8")
-
-
-def _gitignore(root: Path) -> None:
-    """Medic's working state (incidents, evidence, worktrees) never belongs in the user's history."""
-    path = root / ".gitignore"
-    text = path.read_text(encoding="utf-8") if path.exists() else ""
-    if ".medic/" in {line.strip() for line in text.splitlines()}:
-        return
-    path.write_text(text + ("\n" if text and not text.endswith("\n") else "") + ".medic/\n", encoding="utf-8")
 
 
 REQUIREMENTS = (("agent-medic", "agent-medic @ git+https://github.com/thebhavye/agent-medic.git"),
                 ("neatlogs", "neatlogs"))
+
+
+def _dependencies(root: Path):
+    """(file, new text) adding the runtime and neatlogs to the app's dependencies; () when they're
+    already there; None when there's no manifest init knows how to edit."""
+    req = root / "requirements.txt"
+    if req.exists():
+        text = req.read_text(encoding="utf-8")
+        names = {re.split(r"[<>=\[ ;@]", line.strip(), maxsplit=1)[0].lower()
+                 for line in text.splitlines() if line.strip()}
+        add = [line for name, line in REQUIREMENTS if name not in names]
+        return ("requirements.txt", text.rstrip("\n") + "\n" + "\n".join(add) + "\n") if add else ()
+    pyproject = root / "pyproject.toml"
+    if not pyproject.exists():
+        return None
+    text = pyproject.read_text(encoding="utf-8")
+    lines = text.splitlines(keepends=True)
+    section = None
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("["):
+            section = stripped
+            continue
+        if section == "[project]" and re.match(r"dependencies\s*=\s*\[\s*$", stripped):
+            # PEP 621, one dependency per line
+            end = next((j for j in range(i + 1, len(lines)) if lines[j].strip().startswith("]")), None)
+            if end is None:
+                return None
+            have = "".join(lines[i + 1:end]).lower()
+            add = [f'    "{line}",\n' for name, line in REQUIREMENTS if f'"{name}' not in have]
+            return ("pyproject.toml", "".join(lines[:end] + add + lines[end:])) if add else ()
+        if section == "[tool.poetry.dependencies]":
+            block_end = next((j for j in range(i, len(lines)) if lines[j].strip().startswith("[")), len(lines))
+            have = {re.split(r"\s*=", lines[j].strip(), maxsplit=1)[0].strip('"').lower()
+                    for j in range(i, block_end) if "=" in lines[j]}
+            poetry = {"agent-medic": 'agent-medic = { git = "https://github.com/thebhavye/agent-medic.git" }\n',
+                      "neatlogs": 'neatlogs = "*"\n'}
+            add = [line for name, line in poetry.items() if name not in have]
+            if not add:
+                return ()
+            at = block_end
+            while at > i and not lines[at - 1].strip():
+                at -= 1                  # before the blank lines that close the table
+            return ("pyproject.toml", "".join(lines[:at] + add + lines[at:]))
+    return None
+
+
+def _gitignore(root: Path) -> str | None:
+    """.gitignore with Medic's working state (incidents, evidence, worktrees) kept out of the user's
+    history; None when it's already there."""
+    path = root / ".gitignore"
+    text = path.read_text(encoding="utf-8") if path.exists() else ""
+    if ".medic/" in {line.strip() for line in text.splitlines()}:
+        return None
+    return text + ("\n" if text and not text.endswith("\n") else "") + ".medic/\n"
 
 
 def _current_branch(root: Path) -> str:

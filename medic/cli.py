@@ -142,11 +142,10 @@ def cmd_init(args) -> int:
         return 1
     if not args.write:
         print()
-        print(init_mod.diff(plan, edits) or "(no code changes needed)")
-        print(f"\nmedic.toml would be: entrypoint {proj.entrypoint}, files {', '.join(proj.files)}")
+        print(init_mod.diff(plan, edits) or "(nothing to change: already connected)")
         print("\nThis was a dry run. Review the diff, then: agent-medic init --write")
         return 0
-    print(f"\nwrote {len(edits)} file(s) and medic.toml. Next:")
+    print(f"\nwrote {', '.join(edits) or 'nothing (already connected)'}. Next:")
     print("  1. commit, and deploy with GIT_SHA set to the commit (and MEDIC_ENV=prod) in production")
     print("  2. agent-medic neatlogs setup        # detections and alert rules in your neatlogs project")
     print("  3. agent-medic evals bootstrap       # known-answer questions from your healthy traffic")

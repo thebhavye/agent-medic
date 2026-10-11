@@ -443,34 +443,60 @@ def entrypoint(fn):
     """Mark the function that answers one request (`answer(question) -> str` or a dict with
     "answer"). Each call becomes one request for the guards and armed mode, and one AGENT span
     in neatlogs carrying the question and the answer, which is what Medic reads back."""
+    is_async = inspect.iscoroutinefunction(fn)
     span = None
     try:
         import neatlogs
 
-        def _agent(question: str, _run):
-            result = _run()
-            text = result if isinstance(result, str) else (result or {}).get("answer", "") if isinstance(result, dict) \
-                else str(result)
-            return {"answer": text, "_result": result}
+        if is_async:
+            async def _agent(question: str, _run):
+                result = await _run()
+                return {"answer": _answer_text(result), "_result": result}
+        else:
+            def _agent(question: str, _run):
+                result = _run()
+                return {"answer": _answer_text(result), "_result": result}
         span = neatlogs.span(kind="AGENT", name=fn.__name__)(_agent)
     except Exception:  # noqa: BLE001 - without neatlogs the guards still work
         span = None
 
-    @functools.wraps(fn)
-    def call(*args, **kwargs):
-        question = args[0] if args else next(iter(kwargs.values()), "")
-        with request():
-            if span is not None:
-                out = span(str(question), lambda: fn(*args, **kwargs))
-                result, text = out["_result"], out["answer"]
-            else:
-                result = fn(*args, **kwargs)
-                text = result if isinstance(result, str) else (result or {}).get("answer", "") \
-                    if isinstance(result, dict) else str(result)
-            answer(text or "")
-            return result
+    def _question(args, kwargs):
+        return str(args[0] if args else next(iter(kwargs.values()), ""))
+
+    if is_async:                         # the request stays open until the answer exists
+        @functools.wraps(fn)
+        async def call(*args, **kwargs):
+            with request():
+                if span is not None:
+                    out = await span(_question(args, kwargs), lambda: fn(*args, **kwargs))
+                    result, text = out["_result"], out["answer"]
+                else:
+                    result = await fn(*args, **kwargs)
+                    text = _answer_text(result)
+                answer(text or "")
+                return result
+    else:
+        @functools.wraps(fn)
+        def call(*args, **kwargs):
+            with request():
+                if span is not None:
+                    out = span(_question(args, kwargs), lambda: fn(*args, **kwargs))
+                    result, text = out["_result"], out["answer"]
+                else:
+                    result = fn(*args, **kwargs)
+                    text = _answer_text(result)
+                answer(text or "")
+                return result
     call.__medic_entrypoint__ = True
     return call
+
+
+def _answer_text(result) -> str:
+    if isinstance(result, str):
+        return result
+    if isinstance(result, dict):
+        return str(result.get("answer") or "")
+    return str(result or "")
 
 
 def answer(text: str) -> str:

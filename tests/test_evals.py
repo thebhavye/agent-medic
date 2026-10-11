@@ -37,9 +37,21 @@ def test_from_traces_keeps_healthy_production_answers(monkeypatch):
                                failed="could not" in a)
     monkeypatch.setattr(evidence, "collect", collect)
     reader = SimpleNamespace(list_traces=lambda **kw: traces)
+    asked = []
+
+    def answer_now(questions, runs):     # answered once in production: the current code is asked again
+        asked.extend(questions)
+        return {q: [{"status": "ok", "answer": "Ingrid Solberg runs the pilot."}] for q in questions}
+    monkeypatch.setattr(evals, "_answer", answer_now)
     cases = evals.from_traces(reader)
+    assert asked == ["Who leads it?"]                                   # Narvik was already seen twice
     assert [c["question"] for c in cases] == ["Who leads it?", "Where is the pilot plant?"]
     assert cases[0]["expect"] == [["Ingrid Solberg"]] and cases[1]["expect"] == [["Narvik"]]
+    monkeypatch.setattr(evals, "_answer", lambda questions, runs:
+                        {q: [{"status": "ok", "answer": "Lars Berg leads it."}] for q in questions})
+    skipped = []
+    assert [c["question"] for c in evals.from_traces(reader, log=skipped.append)] == ["Where is the pilot plant?"]
+    assert "disagree" in skipped[0]
 
 
 def test_write_makes_ids_unique(tmp_path):
@@ -87,3 +99,11 @@ def test_from_questions_keeps_only_the_facts_every_answer_agrees_on(tmp_path, mo
 
 def test_a_fact_ending_in_punctuation_is_kept_once():
     assert [g[0] for g in evals.facts("It asks “Who are you?” and *Who are you?*", "What?")].count("Who are you?") == 1
+
+
+def test_scoring_matches_whole_facts():
+    from medic.runner import score
+    ok = {"status": "ok", "answer": "The Pro plan costs 199 dollars; ask Annabelle."}
+    assert not score({"expect": [["99"]]}, ok) and not score({"expect": [["Ann"]]}, ok)
+    assert score({"expect": [["199"], ["Annabelle"]]}, ok)
+    assert score({"expect": [["Who are you?"]]}, {"status": "ok", "answer": "It asks: “Who are you?”"})

@@ -7,6 +7,7 @@ the dependency investigator can later tell whether the API's contract changed.
 
 import json
 import subprocess
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -15,6 +16,7 @@ from medic import contract, evidence, first_aid, paths
 
 RECENT = 6          # traces per window
 MAX_NEW = 6         # traces read per poll: one window
+FETCH_EVERY_S = 60  # how often an unknown release may trigger a git fetch
 HEALTHY_FAILURE_RATE = 0.2
 
 
@@ -128,11 +130,36 @@ class Watcher:
     def _ours(self, tags: list[str]) -> bool:
         """Only traces from releases in this deployment's history (not an earlier deployment's)."""
         release = next((t.split(":", 1)[1] for t in tags if t.startswith("release:")), "")
-        cache = self.__dict__.setdefault("_release_cache", {})
-        if release not in cache:
-            cache[release] = bool(release) and subprocess.run(
-                ["git", "cat-file", "-e", f"{release}^{{commit}}"], cwd=paths.DEPLOY, capture_output=True).returncode == 0
-        return cache[release]
+        if not release:
+            return False
+        known = self.__dict__.setdefault("_known_releases", set())
+        if release in known:
+            return True
+        missing = self.__dict__.setdefault("_missing_releases", {})
+        if time.time() - missing.get(release, 0.0) < FETCH_EVERY_S:
+            return False                 # checked a moment ago; look again after the next fetch
+        missing[release] = time.time()
+        if self._has_commit(release):
+            known.add(release)
+            return True
+        # Maybe deployed before this clone fetched it: fetch (at most once a minute) and look again.
+        # A miss is remembered for a minute only, so the release shows up once a fetch brings it.
+        if time.time() - self.__dict__.get("_fetched_at", 0.0) >= FETCH_EVERY_S:
+            self._fetched_at = time.time()
+            try:
+                subprocess.run(["git", "fetch", "--quiet", "origin"], cwd=paths.DEPLOY, capture_output=True,
+                               timeout=120)
+            except (OSError, subprocess.TimeoutExpired):
+                return False
+            if self._has_commit(release):
+                known.add(release)
+                return True
+        return False
+
+    @staticmethod
+    def _has_commit(release: str) -> bool:
+        return subprocess.run(["git", "cat-file", "-e", f"{release}^{{commit}}"], cwd=paths.DEPLOY,
+                              capture_output=True).returncode == 0
 
     def recent(self, release: str | None = None) -> list[evidence.TraceEvidence]:
         evs = self.all_evidence()

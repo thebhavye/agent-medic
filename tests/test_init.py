@@ -81,13 +81,17 @@ def test_dry_run_writes_nothing_and_the_diff_is_minimal(app):
     plan, edits, proj = init_mod.run(app, write=False)
     assert (app / "app" / "chat.py").read_text() == before and not (app / "medic.toml").exists()
     text = edits["app/chat.py"]
-    assert "@medic.entrypoint\ndef answer(" in text and '@medic.surface("build_messages")' in text
-    assert 'model=medic.value("model", MODEL)' in text and 'medic.value("system_prompt", SYSTEM_PROMPT)' in text
+    assert "@medic.entrypoint\ndef answer(" in text and '@medic.surface("app.chat.build_messages")' in text
+    assert 'model=medic.value("app.chat.model", MODEL)' in text and 'medic.value("app.chat.system_prompt", SYSTEM_PROMPT)' in text
     assert 'neatlogs.init(workflow_name=' in text and '"release:" + os.environ.get("GIT_SHA"' in text
-    assert "helper_not_on_the_path" in text and '@medic.surface("helper_not_on_the_path")' not in text
+    assert "helper_not_on_the_path" in text and 'helper_not_on_the_path")' not in text
     assert 'MODEL = "gpt-4o-mini"' in text                                       # definitions stay as written
-    for new in edits.values():
-        ast.parse(new)
+    for rel, new in edits.items():
+        if rel.endswith(".py"):
+            ast.parse(new)
+    # The dry run shows everything --write would change, not just the code.
+    assert {"medic.toml", "requirements.txt", ".gitignore"} <= set(edits)
+    assert "agent-medic @ git+" in init_mod.diff(plan, edits) and "+++ b/medic.toml" in init_mod.diff(plan, edits)
     assert proj.entrypoint == "app.chat:answer"
 
 
@@ -135,3 +139,33 @@ def test_write_finds_the_apps_venv_and_keeps_medic_state_out_of_git(app):
     assert "agent-medic @ git+https://" in (app / "requirements.txt").read_text()
     init_mod.run(app, write=True)
     assert (app / ".gitignore").read_text().count(".medic/") == 1
+
+
+def test_shared_names_stay_apart_and_imports_come_before_decorators(tmp_path):
+    (tmp_path / "a.py").write_text('MODEL = "small"\n\n\ndef search(q):\n    return [q]\n')
+    (tmp_path / "bot.py").write_text(
+        'def search(q, MODEL="big"):\n    return [q, MODEL]\n\n\n'      # a function above the imports
+        'import os\n\nimport a\nfrom openai import OpenAI\n\nclient = OpenAI()\nMODEL = "gpt-4o-mini"\n\n\n'
+        'def answer(question: str) -> str:\n    hits = search(question) + a.search(question)\n'
+        '    return client.chat.completions.create(model=MODEL, messages=[{"role": "user", "content": str(hits)}])\n')
+    plan, edits, _ = init_mod.run(tmp_path)
+    bot = edits["bot.py"]
+    assert '@medic.surface("bot.search")' in bot and 'medic.value("bot.model", MODEL)' in bot
+    assert bot.index("import medic_runtime as medic") < bot.index("@medic.surface")
+    assert 'return [q, MODEL]' in bot                                  # the parameter is not the setting
+    assert {"bot.py", "medic.toml"} <= set(edits)
+    assert "no requirements.txt or pyproject.toml" in init_mod.report(plan)
+
+
+def test_dependencies_go_into_pyproject_when_there_is_no_requirements_file(tmp_path):
+    (tmp_path / "bot.py").write_text('from openai import OpenAI\n\nclient = OpenAI()\n\n\n'
+                                     'def answer(question: str) -> str:\n'
+                                     '    return client.chat.completions.create(model="m", messages=[])\n')
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "bot"\ndependencies = [\n    "openai>=1",\n]\n')
+    plan, edits, _ = init_mod.run(tmp_path, write=True)
+    deps = tomllib.loads((tmp_path / "pyproject.toml").read_text())["project"]["dependencies"]
+    assert deps[0] == "openai>=1" and any(d.startswith("agent-medic @ git+") for d in deps) and "neatlogs" in deps
+    (tmp_path / "pyproject.toml").write_text('[tool.poetry.dependencies]\npython = "^3.11"\n\n[build-system]\n')
+    init_mod.run(tmp_path, write=True)
+    poetry = tomllib.loads((tmp_path / "pyproject.toml").read_text())["tool"]["poetry"]["dependencies"]
+    assert poetry["neatlogs"] == "*" and poetry["agent-medic"]["git"].endswith("agent-medic.git")

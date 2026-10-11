@@ -20,11 +20,15 @@ Without a medic.toml Medic runs its own demo world (target_agent, managed deploy
 import json
 import os
 import sys
-import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from medic import paths
+
+try:
+    import tomllib
+except ModuleNotFoundError:     # Python 3.10
+    import tomli as tomllib
 
 FILE = "medic.toml"
 
@@ -99,13 +103,16 @@ def current() -> Project | None:
 
 
 def write(project: Project) -> Path:
+    path = project.root / FILE
+    path.write_text(render(project), encoding="utf-8")
+    return path
+
+
+def render(project: Project) -> str:
     files = ", ".join(f'"{f}"' for f in project.files)
-    text = (f'# Agent Medic: how to run and heal this agent. See `agent-medic init --help`.\n\n'
+    return (f'# Agent Medic: how to run and heal this agent. See `agent-medic init --help`.\n\n'
             f'[agent]\nentrypoint = "{project.entrypoint}"\nfiles = [{files}]\n'
             + (f'python = "{project.python}"\n' if project.python else '') + '\n'
             f'[neatlogs]\nworkflow = "{project.workflow}"\n\n'
             f'[deploy]\nmode = "{project.mode}"\nbranch = "{project.branch}"\n\n'
             f'[evals]\ncases = "{project.cases}"\n')
-    path = project.root / FILE
-    path.write_text(text, encoding="utf-8")
-    return path

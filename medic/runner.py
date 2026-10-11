@@ -9,7 +9,9 @@ the same way it runs its demo agent, and scores each answer against the expected
 """
 
 import argparse
+import asyncio
 import importlib
+import inspect
 import json
 import os
 import re
@@ -30,7 +32,16 @@ def score(case: dict, result: dict) -> bool:
     if result["status"] != "ok":
         return False
     answer = normalize(result["answer"])
-    return all(any(normalize(alt) in answer for alt in group) for group in case.get("expect", []))
+    return all(any(contains(answer, normalize(alt)) for alt in group) for group in case.get("expect", []))
+
+
+def contains(text: str, fact: str) -> bool:
+    """The fact as whole words: an expected 99 is not in 199, nor Ann in Annabelle."""
+    return re.search(r"(?<!\w)" + re.escape(fact.strip()) + r"(?!\w)", text) is not None
+
+
+async def _await(awaitable):
+    return await awaitable
 
 
 def load_entry(spec: str):
@@ -78,7 +89,10 @@ def main(argv=None) -> int:
         started = time.monotonic()
         with neatlogs.trace(f"case:{case['id']}", session_id=args.session, case_id=case["id"]):
             try:
-                answer, status, error = text_of(entry(case["question"])), "ok", ""
+                out = entry(case["question"])
+                if inspect.isawaitable(out):          # an async agent
+                    out = asyncio.run(_await(out))
+                answer, status, error = text_of(out), "ok", ""
             except Exception as exc:  # a failing agent is a failed case, not a crashed eval
                 answer, status, error = "", "error", f"{type(exc).__name__}: {exc}"
         stats = medic_runtime.last_request()

@@ -46,8 +46,12 @@ class Medic:
             self._attach_alerts(open_now[-1], self._neatlogs_alerts())
         for inc in open_now:
             self.step(inc)
-        if open_now:
+        open_now = incidents.open_incidents()
+        if any(not self._waiting_on_user(i) for i in open_now):
             return
+        # Every open incident's cure is with the user (in review, or merged and not yet deployed),
+        # which can take days: keep watching for anything else that breaks meanwhile.
+        waiting = open_now
         signals, current = self.watcher.check()
         # The runtime healing a request by itself is an incident too: the code is still broken.
         recent = self.watcher.recent()
@@ -68,6 +72,13 @@ class Medic:
         # Each alert keeps its rule's identity, so one rule's escalation never hides another's.
         signals = [*signals, *(Signal(f"neatlogs_alert:{a.get('ruleName') or a.get('ruleId')}", "neatlogs_alert_hits",
                                       float(a.get("threshold") or 0), float(a.get("count") or 0)) for a in alerts)]
+        if signals and waiting:
+            live = self._live_release()
+            covering = next((i for i in waiting if self._covers(i, live)), None)
+            if covering is not None:     # the same broken release: its incident already has it
+                if alerts:
+                    self._attach_alerts(covering, alerts)
+                signals, alerts = [], []
         if signals:
             escalated = self._recently_escalated(signals)
             if escalated is None:
@@ -164,6 +175,18 @@ class Medic:
         """A user's project whose fixes arrive as pull requests: Medic doesn't own its deploys."""
         proj = project.current()
         return bool(proj and proj.mode == "pr")
+
+    @staticmethod
+    def _waiting_on_user(inc: Incident) -> bool:
+        """The cure is a PR in review, or merged and waiting for the user's deploy."""
+        return inc.phase == "awaiting_merge" or (inc.phase == "deployed" and inc.deploy.get("mode") == "pr")
+
+    def _covers(self, inc: Incident, live: str) -> bool:
+        """Is `live` the release this incident is about (the broken one, or one carrying its fix)?"""
+        if live[:12] == (inc.release or "")[:12]:
+            return True
+        merged = (inc.deploy or {}).get("release")
+        return bool(merged) and delivery.contains(paths.DEPLOY, merged, live)
 
     def _live_release(self) -> str:
         """What production runs. In the demo world, the deploy repo's HEAD. In a user's project,
@@ -577,6 +600,8 @@ class Medic:
         releases = {}
         out = []
         for e in self.watcher.all_evidence():
+            if e.first_aid:
+                continue                 # first aid answered it: no evidence about the cure
             if e.release not in releases:
                 releases[e.release] = delivery.contains(paths.DEPLOY, merged, e.release)
             if releases[e.release]:
@@ -622,8 +647,19 @@ class Medic:
             return
         current = evidence.window(evs)
         signals = compare(self.watcher.state["baseline"], current)
-        inc.monitor = {"window": current, "signals": [s.__dict__ for s in signals]}
         live = evs[-1].release
+        if not signals:
+            # Healthy traffic can still hide wrong answers: the release must also pass the
+            # known-answer questions as it is, with no first aid.
+            sha = gitops.rev_parse(live, paths.DEPLOY)
+            record = canary.run(self.watcher.state, self.log, code_dir=self._release_dir(sha), sha=sha)
+            save_state(self.watcher.state)
+            ok, how = canary.answers_hold(record, self.watcher.state)
+            inc.monitor["canary"] = {"release": sha[:12], "ok": ok, "detail": how}
+            if not ok:
+                signals = [Signal("quality", "canary_pass_rate", self.watcher.state.get("canary_baseline") or 0.75,
+                                  float(record.get("pass_rate") or 0.0))]
+        inc.monitor = {**inc.monitor, "window": current, "signals": [s.__dict__ for s in signals]}
         if not signals:
             self._remove_first_aid(inc, "the cure is live")
             inc.note("resolved", f"production healthy on release {live[:8]} (contains the fix): failure rate "
@@ -633,7 +669,8 @@ class Medic:
             return
         why = "; ".join(s.describe() for s in signals)
         try:
-            revert = delivery.revert_pr(inc, inc.deploy["release"], project.current().branch, paths.DEPLOY, why)
+            revert = delivery.revert_pr(inc, inc.deploy["release"], project.current().branch, paths.DEPLOY, why,
+                                        paths.MEDIC_DIR / "worktrees")
             inc.deploy["revert_pr"] = revert
             note = f"still unhealthy with the fix ({why}); revert PR opened: {revert['url']}"
         except delivery.DeliveryError as exc:
