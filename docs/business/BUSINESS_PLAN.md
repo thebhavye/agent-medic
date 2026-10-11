@@ -32,7 +32,7 @@ verified fix as a pull request. Then it confirms the heal on real traffic.
 |---|---|---|---|
 | Team $49 monthly (3 agents) | $147 | 59.1% | 79.2% |
 | Team $59 monthly (3 agents) | $177 | 65.5% | 82.7% |
-| Team $49, 10 incidents, $9 overage | $309 | 78.8% | 89.9% |
+| Team $49 at 10 incidents per agent ($9 overage on 6 each) | $309 | 78.8% | 89.9% |
 | Team $49 annual, 10% off | $132 | 55.1% | 76.9% |
 | Team $49 annual, 20% off | $118 | 49.8% | 74.0% |
 | Fleet 10 agents · $599 | $599 | 75.9% | 83.0% |
@@ -57,7 +57,11 @@ excludes both. The target is a fully loaded margin above 75%.
 
 ## Unit economics
 
-Measured from 12 terminal incidents: 1 live, 10 benchmark, 1 external.
+Measured from 12 terminal incidents: 1 live, 10 benchmark, 1 external. Fixer tokens are real
+model usage. Eval tokens in the benchmark runs are **estimated** (characters ÷ 4 of each
+request), because the benchmark's target agent runs a deterministic scripted policy instead
+of a model. The live incident's eval tokens are real. The monitoring cost per agent comes
+mostly from those estimates, so it should be re-measured on a real model before pricing.
 
 | Item | Value |
 |---|---|
@@ -94,7 +98,8 @@ All scenarios cover 24 months from October 2026 and start with zero customers.
 - **Growth:** 3% churn and 5 agents per customer. New customers rise from 2 to 5 a month
   in April 2027.
 - **Paid founder:** adds $5,000 a month of founder pay from April 2027.
-- **Downside:** the paid-founder case with weaker demand.
+- **Downside:** Ari's combined downside with founder pay. Its revenue is about 40% of base
+  in year 1 ($8.1k vs $19.2k).
 - **Price cases:** the model also holds Annual $99 and Monthly $99 cases. They keep demand
   fixed, so they test cost, not willingness to pay.
 
@@ -146,7 +151,8 @@ Ours:
 | Founder salary | $0 (Main); $5,000 per month from April 2027 (paid-founder cases) | assumption |
 | Agents per instance | 10 per t3.small; servers bought whole | assumption, untested |
 | Model rates | Claude mix: Haiku checks, Opus fixer | task rates, not invoices |
-| Monitoring cadence | an 8-question check every 10 minutes | measured cost per check |
+| Eval tokens (benchmark) | characters ÷ 4 per request | estimate: the benchmark agent is scripted, not a model |
+| Monitoring cadence | an 8-question check every 10 minutes | cost per check: mostly estimated tokens (scripted benchmark agent) |
 | Incidents | 2 per agent per month | assumption |
 | Self-hosted users | excluded from revenue and costs; no conversion rate assumed | by design |
 | Not modelled | seed funding, sales tax or VAT, income tax, capex, debt, bad debt, refunds | operating profit is before these |

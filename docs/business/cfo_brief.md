@@ -42,6 +42,10 @@ reviewable diff. No tests to write: known-answer checks are learned from the app
 
 ## Measured unit economics (12 terminal incidents: 1 live, 10 benchmark, 1 external)
 
+Fixer tokens are real model usage. Benchmark eval tokens are estimated (characters ÷ 4 per
+request) because the benchmark's target agent is a deterministic scripted policy; the live
+incident's are real. Treat the monitoring cost as an estimate until re-measured on a model.
+
 - Median per incident: 3,110 fixer tokens, 30,058 eval tokens, 127 s to detect (fault
   injection -> incident open; benchmark runs only), 426 s (~7 min) to resolve from incident
   open, 1 fix attempt (p90: 5,221 / 47,506 tokens, 594 s to resolve, 3 attempts).
