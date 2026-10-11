@@ -7,6 +7,8 @@ Each run: fresh deployment, healthy traffic until Medic freezes a baseline, one 
 | api_change | scripted | ollama_cloud | resolved ✅ | dependency_contract ✅ | adapt_client ✅ | - | 0m 48s | 6m 38s | 1 | ✅ |
 | bad_release | scripted | ollama_cloud | resolved ✅ | code_regression ✅ | code_fix ✅ | e3518e20 ✅ | 1m 37s | 5m 58s | 1 | ✅ |
 | bad_release | scripted | ollama_cloud | resolved ✅ | code_regression ✅ | code_fix ✅ | 5a63c291 ✅ | 0m 08s | 8m 52s | 1 | ✅ |
+| bad_release | scripted | ollama_cloud | resolved ✅ | code_regression ✅ | code_fix ✅ | 690a1650 ✅ | 1m 18s | 8m 24s | 3 | ✅ |
+| bad_release | scripted | ollama_cloud | resolved ✅ | code_regression ✅ | code_fix ✅ | d8ffc9c4 ✅ | 2m 21s | 11m 40s | 1 | ✅ |
 | healthy | scripted | ollama_cloud | no_incident ✅ | - | - | - | - | - | - | ✅ |
 | outage | scripted | ollama_cloud | escalated ✅ | dependency_outage ✅ | escalate ✅ | - | 1m 53s | 3m 07s | 0 | ✅ |
 | retry_loop | scripted | ollama_cloud | resolved ✅ | code_regression ✅ | code_fix ✅ | 0ec99a55 ✅ | 5m 44s | 11m 04s | 1 | ✅ |
@@ -14,7 +16,7 @@ Each run: fresh deployment, healthy traffic until Medic freezes a baseline, one 
 | truncated_docs | scripted | ollama_cloud | resolved ✅ | code_regression ✅ | code_fix ✅ | 8f2c0622 ✅ | 3m 42s | 11m 27s | 1 | ✅ |
 | truncated_docs | scripted | ollama_cloud | resolved ✅ | code_regression ✅ | code_fix ✅ | 4c10b218 ✅ | 3m 11s | 13m 05s | 1 | ✅ |
 
-**9/9 runs passed.**
+**11/11 runs passed.**
 
 - **api_change**: The knowledge-base provider ships API v2 under live traffic.
 - **bad_release**: A deploy bundles three commits; one renames a tool parameter in the schema only.

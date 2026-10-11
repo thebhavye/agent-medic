@@ -188,6 +188,7 @@ def incident_view(inc: dict) -> dict:
                    "release": deploy.get("release"), "deployed": deploy.get("deployed"), "at": deploy.get("at")},
         "monitor": inc.get("monitor") or {},
         "first_aid": inc.get("first_aid") or {},
+        "neatlogs": inc.get("neatlogs") or {},
     }
 
 
@@ -282,8 +283,12 @@ def build_state(medic_dir: Path) -> dict:
     }
 
 
+WEBHOOK_MAX_BYTES = 1 << 20
+
+
 class Handler(BaseHTTPRequestHandler):
     medic_dir: Path = paths.MEDIC_DIR
+    timeout = 10        # seconds per socket operation: a slow or stalled client can't hold a thread
 
     def _send(self, code: int, body: bytes, ctype: str) -> None:
         self.send_response(code)
@@ -302,6 +307,28 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, body, "application/json; charset=utf-8")
         else:
             self._send(404, b"not found", "text/plain; charset=utf-8")
+
+    def do_POST(self):
+        """neatlogs alert webhook. It only rings Medic's doorbell: Medic then reads the alert
+        from the authenticated API, so a forged or replayed delivery can't fake an incident."""
+        if self.path.split("?", 1)[0] != "/hooks/neatlogs":
+            self._send(404, b"not found", "text/plain; charset=utf-8")
+            return
+        # The endpoint is public: refuse a missing, malformed, negative or oversized length
+        # before reading anything (the class timeout bounds a slow sender).
+        try:
+            length = int(self.headers.get("Content-Length", ""))
+        except ValueError:
+            length = -1
+        if not 0 <= length <= WEBHOOK_MAX_BYTES:
+            self._send(413 if length > WEBHOOK_MAX_BYTES else 411, b"bad length", "text/plain; charset=utf-8")
+            self.close_connection = True
+            return
+        self.rfile.read(length)                    # drain the body; its content is not trusted
+        bell = Path(self.medic_dir) / "neatlogs" / "doorbell"
+        bell.parent.mkdir(parents=True, exist_ok=True)
+        bell.write_text(str(time.time()), encoding="utf-8")
+        self._send(204, b"", "text/plain; charset=utf-8")
 
     def log_message(self, *args):
         pass

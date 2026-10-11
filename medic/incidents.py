@@ -32,6 +32,7 @@ class Incident:
     deploy: dict = field(default_factory=dict)
     monitor: dict = field(default_factory=dict)
     first_aid: dict = field(default_factory=dict)     # the stand-in that serves users until the cure
+    neatlogs: dict = field(default_factory=dict)      # the neatlogs alert behind it, and what Medic wrote back
     timeline: list = field(default_factory=list)
 
     @property

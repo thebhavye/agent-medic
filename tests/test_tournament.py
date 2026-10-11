@@ -64,6 +64,26 @@ def test_review_checks_the_target_lines_not_just_the_file(tmp_path):
     assert any("outside the target" in p for p in tournament.review(handler_edit, tmp_path, schema))
 
 
+def test_a_dispatch_entry_that_names_the_target_is_on_target(tmp_path):
+    # The live bad_release run: the fix for "tool_handler search_docs" is its dispatch entry,
+    # far from the def. It names the target, so it is on target; rewriting the whole table is not.
+    (tmp_path / "target_agent").mkdir()
+    (tmp_path / "target_agent" / "tools.py").write_text(
+        "def search_docs(query):\n    return query\n" + "\n" * 20 +
+        'TOOL_HANDLERS = {\n    "search_docs": lambda args: search_docs(args["query"]),\n'
+        '    "read_doc": lambda args: read_doc(args["doc_id"]),\n}\n')
+    target = surface("tool_handler", "search_docs", start=1, end=2)
+    entry = [{"path": "target_agent/tools.py", "find": '    "search_docs": lambda args: search_docs(args["query"]),',
+              "replace": '    "search_docs": lambda args: search_docs(args["q"]),'}]
+    assert not any("outside the target" in p for p in tournament.review(entry, tmp_path, target))
+    table = [{"path": "target_agent/tools.py",
+              "find": 'TOOL_HANDLERS = {\n    "search_docs": lambda args: search_docs(args["query"]),\n'
+                      '    "read_doc": lambda args: read_doc(args["doc_id"]),',
+              "replace": 'TOOL_HANDLERS = {\n    "search_docs": lambda args: search_docs(args["q"]),\n'
+                         '    "read_doc": lambda args: read_doc(args["doc_id"]),'}]
+    assert any("outside the target" in p for p in tournament.review(table, tmp_path, target))
+
+
 def test_soundness_runs_on_the_patched_file(tmp_path):
     (tmp_path / "a.py").write_text("import json\nx = json.dumps(1)\n")
     assert tournament.soundness([{"path": "a.py", "find": "", "replace": ""}], tmp_path) == []

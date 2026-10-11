@@ -26,7 +26,8 @@ def decide(triage: dict, findings: dict) -> dict:
     rationale, disagreements = [], []
 
     loc = findings.get("localize", {})
-    for name, f in (("dependency", dep), ("regression", reg), ("loops", loops), ("localize", loc)):
+    nl = findings.get("neatlogs", {})
+    for name, f in (("dependency", dep), ("regression", reg), ("loops", loops), ("localize", loc), ("neatlogs", nl)):
         if f:
             rationale.append(f"{name}: {f.get('verdict')}: {f.get('detail')}")
 
@@ -53,6 +54,17 @@ def decide(triage: dict, findings: dict) -> dict:
                 "the culprit release changed " + ", ".join(f"{k} {n}" for k, n in sorted(changed)) +
                 " but the traces diverge at " + ", ".join(f"{k} {n}" for k, n in sorted(located)[:3]) +
                 "; the bisection is direct evidence, so the release is still blamed, and the fix should look at both")
+        # A third, independent line: neatlogs' own investigation of the same traces.
+        if nl.get("verdict") == "root_cause":
+            named = {n for _, n in changed | located}
+            text = f"{nl.get('location') or ''} {nl.get('detail') or ''} {nl.get('analysis') or ''}"
+            if named and any(n and n in text for n in named):
+                rationale.append("neatlogs' investigation points at the same code: "
+                                 + ", ".join(sorted(n for n in named if n and n in text)))
+                confidence = min(0.98, confidence + 0.02)
+            else:
+                disagreements.append(f"neatlogs' investigation suggests \"{nl.get('detail')}\", which is not where "
+                                     "the bisection and the trace diff point; Medic follows its replayed evidence")
     elif dv == "outage":
         cause, confidence = "dependency_outage", dep.get("confidence", 0.8)
     elif dv == "contract_changed":

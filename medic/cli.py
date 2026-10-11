@@ -129,6 +129,30 @@ def cmd_dashboard(args) -> int:
     return 0
 
 
+def cmd_neatlogs(args) -> int:
+    from medic import neatlogs_link, watcher
+    if args.action == "setup":
+        baseline = watcher.load_state().get("baseline")
+        state = neatlogs_link.setup(neatlogs_link.Api(), baseline=baseline, webhook_url=args.webhook_url)
+        print(f"detections: {len(state.get('detections', {}))}, alert rules: {len(state.get('rules', {}))}, "
+              f"webhook: {'yes' if state.get('webhook') else 'no (Medic reads alert history instead)'}")
+        for key, why in (state.get("skipped") or {}).items():
+            print(f"  skipped {key}: {why}")
+        return 0
+    state = neatlogs_link.load()
+    if not state.get("rules"):
+        print("not set up: run `agent-medic neatlogs setup`")
+        return 1
+    api = neatlogs_link.Api()
+    fires = api.call("GET", "/alert-history", limit=10).get("alertHistory", [])
+    ours = set(state["rules"].values())
+    print(f"detections {len(state['detections'])}, rules {len(ours)}, webhook {'yes' if state.get('webhook') else 'no'}")
+    for f in fires:
+        if f.get("ruleId") in ours:
+            print(f"  {f.get('firedAt')}  {f.get('ruleName')}  count={f.get('count')}  traces={len(f.get('sampleTraceIds') or [])}")
+    return 0
+
+
 def main() -> int:
     load_dotenv()
     for stream in (sys.stdout, sys.stderr):   # model text can contain any Unicode
@@ -167,6 +191,11 @@ def main() -> int:
     a = sub.add_parser("approve")
     a.add_argument("id")
     a.set_defaults(func=cmd_approve)
+
+    n = sub.add_parser("neatlogs", help="connect Medic to neatlogs: detections, alert rules, webhook")
+    n.add_argument("action", choices=["setup", "status"])
+    n.add_argument("--webhook-url", help="public URL of this Medic's /hooks/neatlogs (e.g. the EC2 dashboard)")
+    n.set_defaults(func=cmd_neatlogs)
 
     d = sub.add_parser("dashboard", help="live dashboard: watch production break and Medic heal it")
     d.add_argument("--port", type=int, default=8790)

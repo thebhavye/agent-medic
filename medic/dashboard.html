@@ -541,8 +541,18 @@ function detectStage(inc){
     ex.tool_errors && ex.tool_errors.length ? h("div", {class:"x", style:"color:var(--bad)"}, ex.tool_errors.map(function(e){ return (e.tool || "") + ": " + (e.type || "") + " " + (e.message || ""); }).join("; ")) : null) : null;
   return stage(1, stateOf(inc, "open", "triaged"), "Detected", took(inc, "open", "triaged") && "triaged in " + took(inc, "open", "triaged"),
     inc.symptom || "Production signals moved away from the healthy baseline.",
+    h("div", null, neatlogsAlert(inc),
     h("div", {class:"grid2"}, h("div", {class:"box"}, h("h4", null, "What moved"), sigs.length ? sigs : h("span", {class:"muted"}, "—"),
-      inc.healthy_release ? h("div", {class:"x muted", style:"font-size:12.5px;margin-top:8px"}, "last healthy release ", sha(inc.healthy_release), " · now on ", sha(inc.release)) : null), exBox));
+      inc.healthy_release ? h("div", {class:"x muted", style:"font-size:12.5px;margin-top:8px"}, "last healthy release ", sha(inc.healthy_release), " · now on ", sha(inc.release)) : null), exBox)));
+}
+function neatlogsAlert(inc){
+  var a = (inc.neatlogs || {}).alert;
+  if (!a) return null;
+  return h("div", {class:"box", style:"margin-bottom:12px;border-color:var(--accent)"}, h("h4", null, "Raised by neatlogs"),
+    h("div", null, h("b", null, a.ruleName || "alert"), a.detectionName ? h("span", {class:"muted"}, " · detection “" + a.detectionName + "”") : null),
+    h("div", {class:"faint", style:"font-size:12.5px;margin-top:4px"}, (a.count != null ? a.count + " hits" : "") +
+      (a.windowMinutes ? " in " + a.windowMinutes + " min" : "") + " · fired " + (a.firedAt ? new Date(a.firedAt).toLocaleTimeString() : "") +
+      " · " + ((inc.neatlogs.sample_trace_ids || []).length) + " sample traces"));
 }
 
 function diagnoseStage(inc){
@@ -571,7 +581,7 @@ function diagnoseStage(inc){
         "compared " + f.healthy + " healthy with " + f.failing + " failing traces step by step"));
     }
     return h("div", {class:"inv"},
-      h("div", {class:"who"}, words(f.name), h("small", null, {dependency:"is the API still the same?", regression:"which release broke it?", localize:"where do traces diverge?", loops:"is it stuck retrying?"}[f.name] || "")),
+      h("div", {class:"who"}, words(f.name), h("small", null, {dependency:"is the API still the same?", regression:"which release broke it?", localize:"where do traces diverge?", loops:"is it stuck retrying?", neatlogs:"what does neatlogs' investigation say?"}[f.name] || "")),
       h("div", null, chip(words(f.verdict), verdictKind(f.verdict)), f.confidence != null ? h("div", {class:"meter", title:"confidence " + pct(f.confidence)}, h("i", {style:"width:" + pct(f.confidence)})) : null,
         f.confidence != null ? h("div", {class:"faint", style:"font-size:11.5px"}, pct(f.confidence) + " confident") : null),
       h("div", null, f.detail, extra));
@@ -719,9 +729,14 @@ function healStage(inc){
   if (inc.phase === "escalated") return stage(6, "fail", "Escalated to a human", null,
     (inc.timeline || []).filter(function(e){ return e.phase === "escalated"; }).map(function(e){ return e.msg; }).pop() || "Medic could not heal this safely.", null);
   var done = inc.phase === "resolved";
+  var notes = (inc.neatlogs || {}).notes || [];
+  var written = notes.length ? h("div", {class:"box sunk", style:"margin-top:4px"}, h("h4", null, "Written back to neatlogs"),
+    notes.map(function(n){ return h("div", {style:"font-size:13px;padding:2px 0"}, h("span", {class:"mono faint"}, clock(n.at) + " "), n.text,
+      h("span", {class:"faint"}, n.card ? " · added to neatlogs' fix card" : " · in Medic's neatlogs traces")); }),
+    inc.neatlogs.suggestion_resolved ? h("div", {style:"font-size:13px;margin-top:4px;color:var(--ok)"}, "neatlogs fix suggestion marked resolved") : null) : null;
   return stage(6, done ? "done" : reached(inc, "deployed") ? "now" : "pending", "Healed", took(inc, "deployed", "resolved"),
     done ? "After promotion Medic kept watching: " + (m.n || 0) + " production traces at a " + pct(m.failure_rate) + " failure rate. Incident closed."
-         : "After promotion Medic keeps watching production before closing the incident.", null);
+         : "After promotion Medic keeps watching production before closing the incident.", written);
 }
 
 /* ---------- other views ---------- */
