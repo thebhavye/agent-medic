@@ -111,8 +111,13 @@ class Watcher:
         """Evidence for specific traces (an alert's samples), in the given order: from what the
         watcher already read, else fetched from neatlogs. Only finalized production traces of
         this deployment; the rolling window is left alone."""
+        return self.read_samples(trace_ids)[0]
+
+    def read_samples(self, trace_ids: list[str]) -> tuple[list[evidence.TraceEvidence], list[str]]:
+        """(evidence of the samples that are this deployment's production traces, ids that couldn't
+        be read yet). A sample that couldn't be read says nothing about whose it is."""
         known = {e.trace_id: e for e in self.all_evidence()}
-        out = []
+        out, unread = [], []
         for trace_id in dict.fromkeys(trace_ids):
             if trace_id in known:
                 out.append(known[trace_id])
@@ -120,12 +125,14 @@ class Watcher:
             try:
                 trace = self.reader._get(f"/traces/{trace_id}")
                 trace = trace.get("trace", trace)
-                if (trace.get("finalizationStatus") == "finalized" and "env:prod" in (trace.get("tags") or [])
-                        and self._ours(trace["tags"])):
+                if trace.get("finalizationStatus") != "finalized":
+                    unread.append(trace_id)          # still arriving: can't tell yet
+                elif "env:prod" in (trace.get("tags") or []) and self._ours(trace["tags"]):
                     out.append(evidence.collect(self.reader, trace))
-            except Exception as exc:  # noqa: BLE001 - a sample we can't read is skipped, not fatal
+            except Exception as exc:  # noqa: BLE001 - a sample we can't read is retried, not fatal
+                unread.append(trace_id)
                 self.log(f"[medic] could not read alert sample {trace_id[:8]}: {type(exc).__name__}")
-        return out
+        return out, unread
 
     def _ours(self, tags: list[str]) -> bool:
         """Only traces from releases in this deployment's history (not an earlier deployment's)."""

@@ -432,16 +432,37 @@ def test_prs_go_to_the_origin_remote_never_the_upstream(tmp_path):
 
 def test_an_alert_counts_only_with_sample_traces_from_this_deployment(pr_medic, monkeypatch):
     m, _ = pr_medic
-    fires = [{"ruleName": "Medic: tool call failed (3 in 5 min)", "sampleTraceIds": []},          # no samples
-             {"ruleName": "Medic: tool call failed (3 in 5 min)", "sampleTraceIds": ["other-app"]},
-             {"ruleName": "Medic: non-answers", "sampleTraceIds": ["ours-1", "other-app"]}]
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    fires = [{"id": "a1", "ruleName": "Medic: tool call failed (3 in 5 min)", "sampleTraceIds": [], "firedAt": now},
+             {"id": "a2", "ruleName": "Medic: tool call failed (3 in 5 min)", "sampleTraceIds": ["other-app"],
+              "firedAt": now},
+             {"id": "a3", "ruleName": "Medic: non-answers", "sampleTraceIds": ["ours-1", "other-app"], "firedAt": now}]
     monkeypatch.setattr(m, "_neatlogs", lambda: object(), raising=False)
     monkeypatch.setattr(agent_mod.neatlogs_link, "new_alerts", lambda api, since=None: fires)
-    m.watcher.evidence_for = lambda ids: [i for i in ids if i.startswith("ours")]   # what the watcher accepts
+    m.watcher.read_samples = lambda ids: ([i for i in ids if i.startswith("ours")], [])
     logged = []
     m.log = logged.append
     assert [a["ruleName"] for a in m._neatlogs_alerts()] == ["Medic: non-answers"]
     assert sum("ignored" in line for line in logged) == 2
+
+
+def test_an_alert_whose_samples_cannot_be_read_yet_is_tried_again(pr_medic, monkeypatch):
+    m, _ = pr_medic
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    fresh = [{"id": "a1", "ruleName": "Medic: non-answers", "sampleTraceIds": ["ours-1"], "firedAt": now}]
+    monkeypatch.setattr(m, "_neatlogs", lambda: object(), raising=False)
+    monkeypatch.setattr(agent_mod.neatlogs_link, "new_alerts", lambda api, since=None: fresh)
+    m.log = lambda line: None
+    m.watcher.read_samples = lambda ids: ([], list(ids))                 # neatlogs hiccup: unreadable
+    assert m._neatlogs_alerts() == []
+    fresh = []                                                           # already marked seen by neatlogs_link
+    m.watcher.read_samples = lambda ids: (list(ids), [])                 # readable again
+    assert [a["id"] for a in m._neatlogs_alerts()] == ["a1"]             # not lost
+    assert agent_mod.neatlogs_link.load().get("retry_alerts") == []
+    old = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 3600))
+    fresh = [{"id": "a2", "ruleName": "Medic: non-answers", "sampleTraceIds": ["x"], "firedAt": old}]
+    m.watcher.read_samples = lambda ids: ([], list(ids))
+    assert m._neatlogs_alerts() == [] and not agent_mod.neatlogs_link.load().get("retry_alerts")   # too old to wait
 
 
 def test_the_printed_commands_never_run_a_model_written_title(tmp_path, monkeypatch):

@@ -121,3 +121,10 @@ def test_an_open_question_with_several_right_answers_accepts_any():
     assert not score(c, {"status": "ok", "answer": "Unable to find matching results."})
     assert evals.case("What does the Caterpillar ask Alice?", asks[0], ("I could not find that.",), any_of=True) is None
     assert evals.case("What does the Caterpillar ask Alice?", asks[0], tuple(asks[1:])) is None   # strict by default
+
+
+def test_identifiers_and_every_sampled_answer_survive():
+    assert evals.facts('Call "__init__" first.', "What runs first?") == [["__init__"]]
+    answers = [f"It says “word{i}”." for i in range(8)]
+    c = evals.case("What does it say?", answers[0], tuple(answers[1:]), any_of=True)
+    assert len(c["expect"][0]) == 8                                       # not capped at six

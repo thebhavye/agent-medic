@@ -39,7 +39,7 @@ def facts(answer: str, question: str = "") -> list[list[str]]:
     out = []
     for kind in (NUMBER, QUOTED, EMPHASIS, NAME):
         for m in kind.finditer(answer):
-            text = (next(g for g in m.groups() if g) if m.groups() else m.group(0)).strip(" \"“”'.,;:!*_")
+            text = (next(g for g in m.groups() if g) if m.groups() else m.group(0)).strip(" \"“”'.,;:!*")
             if kind is NAME and " " in text and text.split(" ", 1)[0] in STOP:
                 text = text.split(" ", 1)[1]          # "The Queen of Hearts" starts a sentence
             key = text.lower()
@@ -86,7 +86,7 @@ def case(question: str, answer: str, others: tuple = (), any_of: bool = False) -
                 return None            # an answer with nothing checkable: no reliable case
             if not any(_within(f.lower(), _plain(text).lower()) for f in firsts):
                 firsts.append(found[0][0])
-        expect = [firsts[:6]]          # one group: any of these facts
+        expect = [firsts]              # one group: any of these facts (every sampled answer kept)
     if not expect:
         return None                    # nothing checkable: such a case could never fail
     return {"id": slug(question), "question": question, "expect": expect, "source_answer": answer[:400]}

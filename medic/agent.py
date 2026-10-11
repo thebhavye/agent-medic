@@ -111,14 +111,26 @@ class Medic:
             return []
         # Alert rules see the whole neatlogs project, which can hold other agents and other
         # deployments. An alert counts only if its own sample traces show this deployment failing.
-        mine = []
+        # One whose samples couldn't be read yet waits (new_alerts already marked it seen, so it
+        # would otherwise be lost to a moment of neatlogs trouble) until it's too old to matter.
+        state = neatlogs_link.load()
+        waiting = {a["id"]: a for a in state.get("retry_alerts") or []}
         for alert in alerts:
-            samples = self.watcher.evidence_for(alert.get("sampleTraceIds") or [])
+            waiting.pop(alert.get("id"), None)
+        mine, retry = [], []
+        for alert in [*waiting.values(), *alerts]:
+            samples, unread = self.watcher.read_samples(alert.get("sampleTraceIds") or [])
             if samples:
                 mine.append(alert)
+            elif unread and time.time() - neatlogs_link._iso_ts(alert.get("firedAt")) < neatlogs_link.MAX_ALERT_AGE_S:
+                retry.append(alert)
+                self.log(f"[neatlogs] alert '{alert.get('ruleName')}': {len(unread)} sample trace(s) not readable "
+                         "yet; trying again next check")
             else:
                 self.log(f"[neatlogs] alert '{alert.get('ruleName')}' ignored: none of its sample traces are "
                          f"production traces of '{paths.WORKFLOW}' from this repo's releases")
+        if retry or waiting:
+            neatlogs_link.save({**neatlogs_link.load(), "retry_alerts": retry})
         return mine
 
     def _attach_alerts(self, inc: Incident, alerts: list[dict]) -> None:
