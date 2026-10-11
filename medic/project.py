@@ -9,6 +9,7 @@
 
     [deploy]
     mode = "pr"                             # pr: fixes arrive as pull requests | managed: Medic deploys
+    pr = "open"                             # open: Medic opens the PR | ready: it prepares it, you open it
     branch = "main"
 
     [evals]
@@ -40,6 +41,7 @@ class Project:
     files: list = field(default_factory=list)
     workflow: str = "agent"
     mode: str = "pr"
+    pr: str = "open"                     # "open" | "ready" (prepared by Medic, opened by the user)
     branch: str = "main"
     cases: str = ".medic/evals.jsonl"
     python: str = ""                     # the app's own interpreter (its venv); default: Medic's
@@ -69,7 +71,7 @@ def load(path: Path) -> Project:
         raise ValueError(f"{path}: [agent] entrypoint is required (module:function)")
     return Project(root=path.parent.resolve(), entrypoint=agent["entrypoint"], files=list(agent.get("files", [])),
                    workflow=data.get("neatlogs", {}).get("workflow", "agent"), mode=deploy.get("mode", "pr"),
-                   branch=deploy.get("branch", "main"), cases=data.get("evals", {}).get("cases", ".medic/evals.jsonl"),
+                   branch=deploy.get("branch", "main"), pr=deploy.get("pr", "open"), cases=data.get("evals", {}).get("cases", ".medic/evals.jsonl"),
                    python=agent.get("python", ""))
 
 
@@ -114,5 +116,5 @@ def render(project: Project) -> str:
             f'[agent]\nentrypoint = "{project.entrypoint}"\nfiles = [{files}]\n'
             + (f'python = "{project.python}"\n' if project.python else '') + '\n'
             f'[neatlogs]\nworkflow = "{project.workflow}"\n\n'
-            f'[deploy]\nmode = "{project.mode}"\nbranch = "{project.branch}"\n\n'
+            f'[deploy]\nmode = "{project.mode}"\npr = "{project.pr}"\nbranch ="{project.branch}"\n\n'
             f'[evals]\ncases = "{project.cases}"\n')

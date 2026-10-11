@@ -179,7 +179,8 @@ class Medic:
     @staticmethod
     def _waiting_on_user(inc: Incident) -> bool:
         """The cure is a PR in review, or merged and waiting for the user's deploy."""
-        return inc.phase == "awaiting_merge" or (inc.phase == "deployed" and inc.deploy.get("mode") == "pr")
+        return inc.phase in ("pr_ready", "awaiting_merge") or (inc.phase == "deployed"
+                                                               and inc.deploy.get("mode") == "pr")
 
     def _covers(self, inc: Incident, live: str) -> bool:
         """Is `live` the release this incident is about (the broken one, or one carrying its fix)?"""
@@ -308,7 +309,8 @@ class Medic:
     def step(self, inc: Incident) -> None:
         handler = {"open": self.do_triage, "triaged": self.do_investigate, "investigated": self.do_decide,
                    "decided": self.do_remedy, "remedied": self.do_deploy, "canary": self.do_canary,
-                   "awaiting_merge": self.do_await_merge, "deployed": self.do_monitor}[inc.phase]
+                   "pr_ready": self.do_pr_ready, "awaiting_merge": self.do_await_merge,
+                   "deployed": self.do_monitor}[inc.phase]
         with neatlogs.trace(f"medic:{inc.phase}", kind="AGENT", session_id=f"incident-{inc.id}",
                             incident_id=inc.id, phase=inc.phase):
             handler(inc)
@@ -562,9 +564,18 @@ class Medic:
         deploy as usual. First aid (if any) keeps users served in the meantime."""
         proj = project.current()
         accepted = next((a for a in reversed(inc.remedy.get("attempts", [])) if a.get("accepted")), {})
+        title = f"Medic: {accepted.get('commit_title') or 'fix for incident ' + inc.id}"
+        if proj.pr == "ready" and not inc.deploy.get("approved"):
+            ready = delivery.prepare_pr(inc, inc.remedy["branch"], proj.branch, title, paths.MEDIC_DIR / "prs")
+            inc.deploy = {**inc.deploy, "mode": "pr", "ready": ready, "at": time.time()}
+            inc.note("remedy", f"fix PR ready, not opened: review {ready['body_file']}, then open it with "
+                               f"`agent-medic approve {inc.id}` (or: {' && '.join(ready['commands'])})", self.log)
+            self._tell_neatlogs(inc, f"fix ready as a pull request on branch {ready['branch']}, waiting for a "
+                                     "human to open it")
+            inc.phase = "pr_ready"
+            return
         try:
-            pr = delivery.open_pr(inc, inc.remedy["branch"], proj.branch, paths.DEPLOY,
-                                  title=f"Medic: {accepted.get('commit_title') or 'fix for incident ' + inc.id}")
+            pr = delivery.open_pr(inc, inc.remedy["branch"], proj.branch, paths.DEPLOY, title=title)
         except delivery.DeliveryError as exc:
             inc.note("escalated", f"could not open the fix PR ({exc}); the fix is on branch "
                                   f"{inc.remedy['branch']}", self.log)
@@ -574,6 +585,26 @@ class Medic:
         inc.note("remedy", f"fix PR opened: {pr['url']}; waiting for it to be merged and deployed", self.log)
         self._tell_neatlogs(inc, f"fix proposed as a pull request: {pr['url']}")
         inc.phase = "awaiting_merge"
+
+    def do_pr_ready(self, inc: Incident) -> None:
+        """The prepared PR waits for the user: `agent-medic approve` has Medic open it; opening it
+        by hand with the printed commands works too, and Medic picks it up."""
+        if inc.deploy.get("approved"):
+            self._open_fix_pr(inc)
+            return
+        if time.time() - inc.deploy.get("looked_at", 0) < 60:
+            return                       # looking on GitHub once a minute is plenty
+        inc.deploy["looked_at"] = time.time()
+        try:
+            url = delivery.existing_pr(inc.deploy["ready"]["branch"], paths.DEPLOY)
+        except delivery.DeliveryError as exc:
+            self.log(f"[medic] could not look for the fix PR: {exc}")
+            return
+        if url:
+            inc.deploy = {**inc.deploy, "pr": {"url": url, "branch": inc.deploy["ready"]["branch"]}}
+            inc.note("remedy", f"fix PR opened by hand: {url}; waiting for it to be merged and deployed", self.log)
+            self._tell_neatlogs(inc, f"fix proposed as a pull request: {url}")
+            inc.phase = "awaiting_merge"
 
     def do_await_merge(self, inc: Incident) -> None:
         pr = inc.deploy.get("pr") or {}

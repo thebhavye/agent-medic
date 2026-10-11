@@ -231,8 +231,8 @@ footer{color:var(--faint);font-size:12px;text-align:center;padding:10px 0 40px}
 "use strict";
 var DATA = null, LAST = "", FETCHED = 0, OPEN = new Set();
 var PHASE_LABEL = {open:"Detected", triaged:"Triaged", investigated:"Investigated", decided:"Diagnosed",
-  first_aid:"First aid", remedied:"Fix ready", canary:"Canary", deployed:"Promoted", resolved:"Healed", escalated:"Escalated"};
-var OPEN_PHASES = ["open","triaged","investigated","decided","remedied","canary","deployed"];
+  first_aid:"First aid", remedied:"Fix ready", canary:"Canary", pr_ready:"PR ready", awaiting_merge:"PR in review", deployed:"Promoted", resolved:"Healed", escalated:"Escalated"};
+var OPEN_PHASES = ["open","triaged","investigated","decided","remedied","canary","pr_ready","awaiting_merge","deployed"];
 
 /* ---------- helpers ---------- */
 function h(tag, attrs){
@@ -489,7 +489,7 @@ function chart(prod, inc){
 
 /* ---------- incident case file ---------- */
 function reached(inc, phase){
-  var order = ["open","triaged","investigated","decided","remedied","canary","deployed","resolved"];
+  var order = ["open","triaged","investigated","decided","remedied","canary","pr_ready","awaiting_merge","deployed","resolved"];
   if (inc.phase === "escalated") return (inc.phases || []).some(function(p){ return p.phase === phase && p.t; });
   return order.indexOf(inc.phase) >= order.indexOf(phase);
 }
@@ -689,7 +689,24 @@ function liveStatus(release){
   return live.indexOf(mine) === 0 ? "it is the live release" : "since replaced by " + short(live);
 }
 
+function prStage(inc){
+  // PR mode: the fix goes to the user's repo as a pull request, ready for them or opened by Medic.
+  var pr = inc.pr || {}, merged = ["deployed", "resolved"].indexOf(inc.phase) >= 0 || (inc.canary || {}).deployed;
+  var st = inc.phase === "escalated" && !merged ? "fail" : merged ? "done" : "now";
+  var url = /^https:\/\//.test(pr.url || "") ? pr.url : null;
+  if (url) return stage(5, st, "Pull request", null, merged ? "Merged. Medic waits for a production release that contains it."
+      : "Opened on your repo with the evidence. Merge and deploy as usual.",
+    h("div", {class:"box"}, h("a", {href:url, target:"_blank", rel:"noopener noreferrer", class:"mono"}, url)));
+  var ready = pr.ready || {};
+  return stage(5, st, "Pull request", null, "Ready, not opened: nothing was pushed. Review the description, then open it.",
+    h("div", {class:"log", style:"margin-top:8px"},
+      h("div", null, h("span", {class:"mono"}, "agent-medic approve " + inc.id), h("span", {class:"faint"}, "  Medic opens it")),
+      (ready.commands || []).map(function(c){ return h("div", {class:"mono"}, c); }),
+      ready.body_file ? h("div", {class:"faint"}, "description: " + ready.body_file) : null));
+}
+
 function canaryStage(inc){
+  if (inc.pr && (inc.pr.ready || inc.pr.url)) return prStage(inc);
   var c = inc.canary || {}, ro = c.rollout || (DATA.rollout && DATA.rollout.incident === inc.id ? DATA.rollout : null);
   var v = c.verdict, st = stateOf(inc, "canary", "deployed");
   if (!ro && !c.deployed) {

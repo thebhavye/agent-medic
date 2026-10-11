@@ -77,6 +77,19 @@ def open_pr(inc, branch: str, base: str, root: Path, title: str) -> dict:
     return {"url": url, "branch": branch, "base": base}
 
 
+def prepare_pr(inc, branch: str, base: str, title: str, out_dir: Path) -> dict:
+    """The PR, ready but not opened (medic.toml: [deploy] pr = "ready"). Nothing is pushed: the fix
+    branch stays in the local repo and the description is written to a file. The user opens it
+    with `agent-medic approve <id>`, or with the two commands returned here."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"{inc.id}.md"
+    path.write_text(body(inc) + "\n", encoding="utf-8")
+    return {"branch": branch, "base": base, "title": title, "body_file": str(path),
+            "commands": [f"git push origin {branch}",
+                         f'gh pr create --base {base} --head {branch} --title "{title.replace(chr(34), chr(39))}" '
+                         f'--body-file "{path}"']}
+
+
 def existing_pr(branch: str, root: Path) -> str:
     raw = _run(["gh", "pr", "list", "--head", branch, "--state", "all", "--json", "url,state", "--limit", "5"], root)
     prs = json.loads(raw or "[]")

@@ -107,10 +107,11 @@ def cmd_incident(args) -> int:
 def cmd_approve(args) -> int:
     from medic import incidents
     for inc in incidents.load_all():
-        if inc.id.startswith(args.id) and inc.phase == "remedied":
+        if inc.id.startswith(args.id) and inc.phase in ("remedied", "pr_ready"):
             inc.deploy["approved"] = True
             incidents.save(inc)
-            print(f"approved deploy for {inc.id}")
+            print(f"approved: Medic opens the fix PR for {inc.id} on its next check" if inc.phase == "pr_ready"
+                  else f"approved deploy for {inc.id}")
             return 0
     print("no incident waiting for approval with that id", file=sys.stderr)
     return 1
@@ -135,7 +136,7 @@ def cmd_init(args) -> int:
 
     from medic import init as init_mod
     root = Path(args.path)
-    plan, edits, proj = init_mod.run(root, workflow=args.workflow, write=args.write, mode=args.mode,
+    plan, edits, proj = init_mod.run(root, workflow=args.workflow, write=args.write, mode=args.mode, pr=args.pr,
                                      branch=args.branch)
     print(init_mod.report(plan))
     if proj is None:
@@ -243,6 +244,8 @@ def main() -> int:
     ini.add_argument("--write", action="store_true", help="apply the edits (default: show the diff only)")
     ini.add_argument("--workflow", help="neatlogs workflow name (default: the folder name)")
     ini.add_argument("--mode", choices=["pr", "managed"], default="pr", help="pr: fixes arrive as pull requests")
+    ini.add_argument("--pr", choices=["open", "ready"], default="open",
+                     help="open: Medic opens the fix PR; ready: it prepares it and you open it")
     ini.add_argument("--branch", help="the branch fixes go to (default: the current one)")
     ini.set_defaults(func=cmd_init)
 

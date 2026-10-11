@@ -362,7 +362,8 @@ def report(plan: Plan) -> str:
     return "\n".join(lines)
 
 
-def run(root: Path, workflow: str | None = None, write: bool = False, mode: str = "pr", branch: str | None = None):
+def run(root: Path, workflow: str | None = None, write: bool = False, mode: str = "pr", branch: str | None = None,
+        pr: str = "open"):
     """Scan, propose, and (with write) apply. Returns (plan, edits, project); `edits` holds every
     file init would change (code, medic.toml, dependencies, .gitignore), so a dry run shows it all."""
     root = root.resolve()
@@ -374,7 +375,8 @@ def run(root: Path, workflow: str | None = None, write: bool = False, mode: str 
     if plan.entrypoint is not None:
         files = sorted({plan.entrypoint.file, *(f.file for f in plan.surfaces), *(r for r, _, _ in plan.values)})
         proj = project_mod.Project(root=root, entrypoint=f"{_module(plan.entrypoint.file)}:{plan.entrypoint.name}",
-                                   files=files, workflow=workflow, mode=mode, branch=branch, python=_venv_python(root))
+                                   files=files, workflow=workflow, mode=mode, branch=branch, pr=pr,
+                                   python=_venv_python(root))
         if not (root / project_mod.FILE).exists():       # an existing medic.toml is the user's: kept
             edits[project_mod.FILE] = project_mod.render(proj)
         deps = _dependencies(root)

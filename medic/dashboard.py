@@ -188,6 +188,8 @@ def incident_view(inc: dict) -> dict:
         "canary": {"rollout": deploy.get("canary"), "verdict": deploy.get("canary_verdict"),
                    "from": deploy.get("from"),
                    "release": deploy.get("release"), "deployed": deploy.get("deployed"), "at": deploy.get("at")},
+        "pr": {"url": (deploy.get("pr") or {}).get("url"), "ready": deploy.get("ready")}
+        if deploy.get("mode") == "pr" else None,
         "monitor": inc.get("monitor") or {},
         "first_aid": inc.get("first_aid") or {},
         "neatlogs": inc.get("neatlogs") or {},

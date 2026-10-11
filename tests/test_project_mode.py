@@ -370,3 +370,42 @@ def test_a_cancelled_answer_fails_its_case_without_stalling_the_run(tmp_path, en
     results = {r["id"]: r for r in json.loads(out.read_text())["cases"]}
     assert results["where"]["passed"] and results["where again"]["passed"], proc.stderr[-500:]
     assert results["cancel"]["status"] == "error" and "cancelled" in results["cancel"]["error"]
+
+
+def test_a_ready_pr_is_prepared_but_not_opened_until_the_user_says(pr_medic, monkeypatch):
+    m, inc = pr_medic
+    monkeypatch.setattr(paths, "PROJECT", project.Project(root=paths.MEDIC_DIR, entrypoint="app:answer", mode="pr",
+                                                          pr="ready"))
+    pushed = []
+    monkeypatch.setattr(delivery, "open_pr", lambda inc, branch, base, root, title: pushed.append(branch) or
+                        {"url": "https://github.com/u/app/pull/7", "branch": branch, "base": base})
+    m.do_deploy(inc)
+    ready = inc.deploy["ready"]
+    assert inc.phase == "pr_ready" and pushed == []                         # nothing left this machine
+    assert ready["commands"][0] == "git push origin medic/fix-inc1"
+    assert "gh pr create --base main --head medic/fix-inc1" in ready["commands"][1]
+    assert "Agent Medic" in open(ready["body_file"], encoding="utf-8").read()
+    monkeypatch.setattr(delivery, "existing_pr", lambda branch, root: "")
+    m.do_pr_ready(inc)
+    assert inc.phase == "pr_ready" and pushed == []                         # still waiting for the user
+    inc.deploy["approved"] = True                                           # agent-medic approve <id>
+    m.do_pr_ready(inc)
+    assert pushed == ["medic/fix-inc1"] and inc.phase == "awaiting_merge" and inc.deploy["pr"]["url"].endswith("/7")
+
+
+def test_a_ready_pr_opened_by_hand_is_picked_up(pr_medic, monkeypatch):
+    m, inc = pr_medic
+    monkeypatch.setattr(paths, "PROJECT", project.Project(root=paths.MEDIC_DIR, entrypoint="app:answer", mode="pr",
+                                                          pr="ready"))
+    m.do_deploy(inc)
+    monkeypatch.setattr(delivery, "existing_pr", lambda branch, root: "https://github.com/u/app/pull/12")
+    m.do_pr_ready(inc)
+    assert inc.phase == "awaiting_merge" and inc.deploy["pr"]["url"].endswith("/12")
+    from dataclasses import asdict
+    assert dashboard.incident_view(asdict(inc))["pr"]["url"].endswith("/12")   # the dashboard links it
+
+
+def test_medic_toml_keeps_the_pr_setting(tmp_path):
+    proj = project.Project(root=tmp_path, entrypoint="app:answer", pr="ready")
+    project.write(proj)
+    assert project.load(tmp_path / "medic.toml").pr == "ready"

@@ -13,7 +13,8 @@ from dataclasses import asdict, dataclass, field
 
 from medic import paths
 
-OPEN_PHASES = ("open", "triaged", "investigated", "decided", "remedied", "canary", "awaiting_merge", "deployed")
+OPEN_PHASES = ("open", "triaged", "investigated", "decided", "remedied", "canary", "pr_ready", "awaiting_merge",
+               "deployed")
 
 
 @dataclass

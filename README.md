@@ -93,8 +93,15 @@ workflow = "rag-tutorial"
 
 [deploy]
 mode = "pr"          # pr: fixes arrive as pull requests | managed: Medic deploys them itself
+pr = "open"          # open: Medic opens the PR | ready: Medic prepares it and you open it
 branch = "main"
 ```
+
+With `pr = "ready"` (or `agent-medic init --pr ready`), nothing is pushed to your repo until you
+say so. Medic keeps the fix branch local, writes the PR description with the evidence to
+`.medic/prs/<incident>.md`, and shows it on the dashboard. `agent-medic approve <incident>` has
+Medic open it. If you open it yourself with the printed `git push` / `gh pr create` commands,
+Medic picks it up either way.
 
 ## What the sponsors' tools do in it
 
