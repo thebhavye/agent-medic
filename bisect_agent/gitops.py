@@ -1,7 +1,9 @@
 """Thin wrappers around git. Commits are tested in throwaway worktrees so the user's
 checkout is never touched."""
 
+import os
 import shutil
+import signal
 import subprocess
 from pathlib import Path
 
@@ -10,9 +12,39 @@ class GitError(RuntimeError):
     pass
 
 
-def git(*args: str, cwd: Path, check: bool = True) -> str:
-    proc = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True,
-                          encoding="utf-8", errors="replace")
+GIT_TIMEOUT_S = 600     # a commit runs the repo's hooks, and a hook can hang
+
+
+def _kill_tree(proc: subprocess.Popen) -> None:
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True)
+    else:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    try:
+        proc.communicate(timeout=10)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+def git(*args: str, cwd: Path, check: bool = True, timeout: float = GIT_TIMEOUT_S) -> str:
+    # Its own process group: on a timeout the hooks git started are ended with it (killing git
+    # alone leaves a hook holding the output pipe, and the wait never returns).
+    group = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt"
+             else {"start_new_session": True})
+    proc = subprocess.Popen(["git", *args], cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                            encoding="utf-8", errors="replace", **group)
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_tree(proc)
+        # Without this, one stuck git hook (seen live: a session-tracking prepare-commit-msg
+        # hook) freezes Medic's whole loop mid-incident instead of failing this one step.
+        raise GitError(f"git {' '.join(args)} timed out after {timeout:.0f}s "
+                       "(a git hook in this repo may be stuck)") from None
+    proc = subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
     if check and proc.returncode != 0:
         raise GitError(f"git {' '.join(args)} failed: {proc.stderr.strip()}")
     return proc.stdout.strip()
