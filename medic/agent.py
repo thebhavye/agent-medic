@@ -11,7 +11,9 @@ from concurrent.futures import ThreadPoolExecutor
 
 import neatlogs
 
-from medic import (anatomy, canary, coordinator, first_aid, incidents, localize, neatlogs_link, paths, remedy,
+from bisect_agent import gitops
+from medic import (anatomy, canary, coordinator, delivery, first_aid, incidents, localize, neatlogs_link, paths,
+                   project, remedy,
                    rollout, triage, world)
 from medic.incidents import Incident
 from medic.investigators import dependency, loops, regression
@@ -54,7 +56,8 @@ class Medic:
             signals = [*signals, Signal("self_healed", "self_healed_rate", 0.0, len(healed) / len(recent))]
         # Wrong-but-confident answers leave no trace signal; the canary eval catches them.
         if self.watcher.state.get("baseline") and canary.due(self.watcher.state):
-            canary.run(self.watcher.state, self.log)
+            live = self._live_release()
+            canary.run(self.watcher.state, self.log, code_dir=self._release_dir(live), sha=live)
             save_state(self.watcher.state)
             quality = canary.regressed(self.watcher.state)
             if quality:
@@ -155,6 +158,36 @@ class Medic:
                                  f"({card['confidence']:.0%}); Medic's diagnosis: "
                                  f"{inc.decision.get('cause', '').replace('_', ' ')}", self.log)
 
+    # -- the user's project (medic.toml) -----------------------------------------------
+
+    def _pr_mode(self) -> bool:
+        """A user's project whose fixes arrive as pull requests: Medic doesn't own its deploys."""
+        proj = project.current()
+        return bool(proj and proj.mode == "pr")
+
+    def _live_release(self) -> str:
+        """What production runs. In the demo world, the deploy repo's HEAD. In a user's project,
+        the release tag on the newest production traces (their deploy sets GIT_SHA)."""
+        if not self._pr_mode():
+            return world.head()
+        recent = self.watcher.recent()
+        tag = recent[-1].release if recent else ""
+        delivery.fetch(paths.DEPLOY)
+        try:
+            return gitops.rev_parse(tag, paths.DEPLOY) if tag else gitops.rev_parse("HEAD", paths.DEPLOY)
+        except Exception:  # noqa: BLE001 - a release Medic can't resolve: fall back to the checkout
+            return gitops.rev_parse("HEAD", paths.DEPLOY)
+
+    def _release_dir(self, sha: str):
+        """A clean checkout of a release to run evals in: the deploy repo itself in the demo world,
+        a cached worktree in a user's project (their own checkout is never used or touched)."""
+        if not self._pr_mode():
+            return paths.DEPLOY
+        work = paths.MEDIC_DIR / "worktrees" / f"release-{sha[:12]}"
+        if not (work / ".git").exists():
+            gitops.worktree_add(work, sha, paths.DEPLOY)
+        return work
+
     def _refresh_standby(self) -> None:
         """Keep the runtime armed: the last known good of every registered part, from the
         healthy release, ready for the runtime to engage by itself."""
@@ -162,7 +195,7 @@ class Medic:
         if not healthy:
             return
         try:
-            live = world.head()
+            live = self._live_release()
             current = first_aid.current_standby()
             # Rebuilt when the healthy release moves, when a new release goes live (it may
             # register parts the old standby doesn't cover), and well before it expires.
@@ -211,7 +244,7 @@ class Medic:
 
     def open(self, signals, alerts: list[dict] | None = None) -> Incident:
         recent = self.watcher.recent()
-        inc = Incident(signals=[s.__dict__ for s in signals], release=world.head(),
+        inc = Incident(signals=[s.__dict__ for s in signals], release=self._live_release(),
                        healthy_release=self._healthy_release(), trace_ids=[e.trace_id for e in recent])
         if alerts:
             # neatlogs' alert is the incident's origin: its rule, its detection, its traces.
@@ -252,7 +285,7 @@ class Medic:
     def step(self, inc: Incident) -> None:
         handler = {"open": self.do_triage, "triaged": self.do_investigate, "investigated": self.do_decide,
                    "decided": self.do_remedy, "remedied": self.do_deploy, "canary": self.do_canary,
-                   "deployed": self.do_monitor}[inc.phase]
+                   "awaiting_merge": self.do_await_merge, "deployed": self.do_monitor}[inc.phase]
         with neatlogs.trace(f"medic:{inc.phase}", kind="AGENT", session_id=f"incident-{inc.id}",
                             incident_id=inc.id, phase=inc.phase):
             handler(inc)
@@ -364,7 +397,7 @@ class Medic:
         # Prove it first: the known-answer eval on the broken release, with the bandage on.
         trial = first_aid.write(paths.MEDIC_DIR / "control" / f"trial-{inc.id}.json", body)
         try:
-            record = canary.evaluate(paths.DEPLOY, inc.release, first_aid=trial, tag="first-aid")
+            record = canary.evaluate(self._release_dir(inc.release), inc.release, first_aid=trial, tag="first-aid")
         finally:
             trial.unlink(missing_ok=True)
         ok, detail = canary.answers_hold(record, self.watcher.state)
@@ -372,7 +405,7 @@ class Medic:
         before = next((r for r in reversed(self.watcher.state.get("canary") or [])
                        if r.get("release") == inc.release[:12] and "pass_rate" in r), None)
         if before is None:      # e.g. opened on trace errors: measure the broken release bare, for the comparison
-            before = canary.evaluate(paths.DEPLOY, inc.release, tag="first-aid-before")
+            before = canary.evaluate(self._release_dir(inc.release), inc.release, tag="first-aid-before")
             before = before if "pass_rate" in before else None
         inc.first_aid = {"what": what, "base": p["base"], "functions": sorted(p["functions"]),
                          "values": sorted(p["values"]), "skipped": p["skipped"],
@@ -409,6 +442,9 @@ class Medic:
             inc.note("escalated", f"no verified fix after {remedy.MAX_ATTEMPTS} attempts", self.log)
 
     def do_deploy(self, inc: Incident) -> None:
+        if self._pr_mode():
+            self._open_fix_pr(inc)
+            return
         if not self.auto_deploy:
             if not inc.deploy.get("approved"):
                 return       # waiting for `agent-medic approve <id>`
@@ -496,7 +532,61 @@ class Medic:
             inc.note("escalated", inc.deploy["detail"], self.log)
             inc.phase = "escalated"
 
+    # -- delivery as a pull request (a user's project) ------------------------------------
+
+    def _open_fix_pr(self, inc: Incident) -> None:
+        """The verified fix goes to the user's repo as a PR with the evidence; they merge and
+        deploy as usual. First aid (if any) keeps users served in the meantime."""
+        proj = project.current()
+        accepted = next((a for a in reversed(inc.remedy.get("attempts", [])) if a.get("accepted")), {})
+        try:
+            pr = delivery.open_pr(inc, inc.remedy["branch"], proj.branch, paths.DEPLOY,
+                                  title=f"Medic: {accepted.get('commit_title') or 'fix for incident ' + inc.id}")
+        except delivery.DeliveryError as exc:
+            inc.note("escalated", f"could not open the fix PR ({exc}); the fix is on branch "
+                                  f"{inc.remedy['branch']}", self.log)
+            inc.phase = "escalated"
+            return
+        inc.deploy = {**inc.deploy, "mode": "pr", "pr": pr, "at": time.time()}
+        inc.note("remedy", f"fix PR opened: {pr['url']}; waiting for it to be merged and deployed", self.log)
+        self._tell_neatlogs(inc, f"fix proposed as a pull request: {pr['url']}")
+        inc.phase = "awaiting_merge"
+
+    def do_await_merge(self, inc: Incident) -> None:
+        pr = inc.deploy.get("pr") or {}
+        try:
+            st = delivery.state(pr["url"], paths.DEPLOY)
+        except (delivery.DeliveryError, KeyError) as exc:
+            self.log(f"[medic] could not read the fix PR: {exc}")
+            return
+        if st["state"] == "MERGED" and st["merge_commit"]:
+            delivery.fetch(paths.DEPLOY)
+            inc.deploy = {**inc.deploy, "release": st["merge_commit"], "merged_at": time.time(), "at": time.time(),
+                          "deployed": True}
+            inc.note("deployed", f"fix PR merged ({st['merge_commit'][:8]}); watching production for a release "
+                                 "that contains it", self.log)
+            inc.phase = "deployed"
+        elif st["state"] == "CLOSED":
+            inc.note("escalated", f"the fix PR was closed without merging: {pr['url']}", self.log)
+            inc.phase = "escalated"
+
+    def _fixed_traces(self, inc: Incident) -> list:
+        """Production traces from releases that contain the merged fix (the user deploys it when
+        they choose; any later release carries it too)."""
+        merged = inc.deploy.get("release", "")
+        releases = {}
+        out = []
+        for e in self.watcher.all_evidence():
+            if e.release not in releases:
+                releases[e.release] = delivery.contains(paths.DEPLOY, merged, e.release)
+            if releases[e.release]:
+                out.append(e)
+        return out[-RECENT:]
+
     def do_monitor(self, inc: Incident) -> None:
+        if inc.deploy.get("mode") == "pr":
+            self._monitor_pr(inc)
+            return
         release = inc.deploy["release"][:12]
         evs = self.watcher.recent(release=release)
         if len(evs) < RECENT:
@@ -519,3 +609,35 @@ class Medic:
             inc.phase = "resolved"
             self._tell_neatlogs(inc, f"healed: release {release[:8]} healthy in production, failure rate "
                                      f"{current['failure_rate']:.0%} over {current['n']} traces", resolved=True)
+
+    PR_DEPLOY_WAIT_S = 7 * 24 * 3600     # the user deploys when they choose; Medic keeps watching
+
+    def _monitor_pr(self, inc: Incident) -> None:
+        evs = self._fixed_traces(inc)
+        if len(evs) < RECENT:
+            if time.time() - inc.deploy["at"] > self.PR_DEPLOY_WAIT_S:
+                inc.note("escalated", "the fix was merged but no production release containing it has served "
+                                      "traffic in a week", self.log)
+                inc.phase = "escalated"
+            return
+        current = evidence.window(evs)
+        signals = compare(self.watcher.state["baseline"], current)
+        inc.monitor = {"window": current, "signals": [s.__dict__ for s in signals]}
+        live = evs[-1].release
+        if not signals:
+            self._remove_first_aid(inc, "the cure is live")
+            inc.note("resolved", f"production healthy on release {live[:8]} (contains the fix): failure rate "
+                                 f"{current['failure_rate']:.0%} over {current['n']} traces", self.log)
+            inc.phase = "resolved"
+            self._tell_neatlogs(inc, f"healed: release {live[:8]} with the fix is healthy in production", resolved=True)
+            return
+        why = "; ".join(s.describe() for s in signals)
+        try:
+            revert = delivery.revert_pr(inc, inc.deploy["release"], project.current().branch, paths.DEPLOY, why)
+            inc.deploy["revert_pr"] = revert
+            note = f"still unhealthy with the fix ({why}); revert PR opened: {revert['url']}"
+        except delivery.DeliveryError as exc:
+            note = f"still unhealthy with the fix ({why}); could not open a revert PR ({exc})"
+        inc.note("escalated", note, self.log)
+        inc.phase = "escalated"
+        self._tell_neatlogs(inc, note)

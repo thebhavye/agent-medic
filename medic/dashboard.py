@@ -12,7 +12,9 @@ the fix was promoted.
 import argparse
 import calendar
 import difflib
+import hmac
 import json
+import os
 import re
 import subprocess
 import sys
@@ -284,6 +286,7 @@ def build_state(medic_dir: Path) -> dict:
 
 
 WEBHOOK_MAX_BYTES = 1 << 20
+CONTROL_FILES = {"/control/first_aid.json": "first_aid.json", "/control/standby.json": "standby.json"}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -305,8 +308,25 @@ class Handler(BaseHTTPRequestHandler):
         elif route == "/api/state":
             body = json.dumps(build_state(self.medic_dir), ensure_ascii=False, default=str).encode("utf-8")
             self._send(200, body, "application/json; charset=utf-8")
+        elif route in CONTROL_FILES:
+            self._send_control(CONTROL_FILES[route])
         else:
             self._send(404, b"not found", "text/plain; charset=utf-8")
+
+    def _send_control(self, name: str) -> None:
+        """First aid for a user's production server (medic_runtime reads MEDIC_CONTROL / MEDIC_STANDBY
+        from here). Bundles hold the user's code, so they're served only with the fetch token, and
+        never at all when no token is configured. They're signed: the runtime checks that too."""
+        token = os.environ.get("MEDIC_CONTROL_TOKEN")
+        sent = (self.headers.get("Authorization") or "").removeprefix("Bearer ").strip()
+        if not token or not hmac.compare_digest(token.encode(), sent.encode()):
+            self._send(404, b"not found", "text/plain; charset=utf-8")
+            return
+        path = Path(self.medic_dir) / "control" / name
+        if not path.exists():
+            self._send(404, b"no bundle", "text/plain; charset=utf-8")
+            return
+        self._send(200, path.read_bytes(), "application/json; charset=utf-8")
 
     def do_POST(self):
         """neatlogs alert webhook. It only rings Medic's doorbell: Medic then reads the alert
