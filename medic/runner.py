@@ -23,6 +23,8 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
+CHECKS_SUFFIX = ":medic-checks"     # the workflow Medic's own eval runs log under
+
 
 def normalize(text: str) -> str:
     """Lowercase, with Unicode dashes and spaces folded to ASCII and Markdown emphasis removed."""
@@ -94,7 +96,10 @@ def main(argv=None) -> int:
     except ImportError:
         pass
     import neatlogs
-    neatlogs.init(workflow_name=args.workflow, tags=["agent-medic", *args.tag])
+    # Medic's own eval runs log under their own workflow, so they never mix with the app's
+    # production traffic in neatlogs (dashboards, analytics, search).
+    workflow = args.workflow if args.workflow.endswith(CHECKS_SUFFIX) else args.workflow + CHECKS_SUFFIX
+    neatlogs.init(workflow_name=workflow, tags=["agent-medic", *args.tag])
     entry = load_entry(args.entry)          # imported after init, so its model clients are traced
     import medic_runtime
 
