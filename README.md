@@ -53,6 +53,7 @@ Then:
 agent-medic evals bootstrap --questions questions.txt   # a new app: a few real questions
 agent-medic evals bootstrap                             # an app with traffic: from healthy traces
 agent-medic neatlogs setup                              # detections + alert rules in your project
+agent-medic doctor                                      # checks the setup, says what to fix
 agent-medic start --dashboard                           # Medic in the background, dashboard on :8790
 agent-medic status                                      # running? any open incident?
 agent-medic stop                                        # stops everything it started

@@ -116,6 +116,15 @@ def cmd_approve(args) -> int:
     return 1
 
 
+def cmd_doctor(args) -> int:
+    from pathlib import Path
+
+    from medic import doctor
+    checks = doctor.run(Path(args.path).resolve())
+    print(doctor.render(checks))
+    return 1 if any(c.status == doctor.FAIL for c in checks) else 0
+
+
 def cmd_start(args) -> int:
     from medic import service
     run = service.start(interval=args.interval, dashboard=args.dashboard, host=args.host)
@@ -318,6 +327,10 @@ def main() -> int:
     d.add_argument("--host", default="127.0.0.1", help="0.0.0.0 to serve other machines (e.g. on EC2)")
     d.add_argument("--medic-dir", default=None, help="a benchmark run under .medic/bench to replay it")
     d.set_defaults(func=cmd_dashboard)
+
+    doc = sub.add_parser("doctor", help="check this project is ready for Medic, and say what to fix")
+    doc.add_argument("path", nargs="?", default=".")
+    doc.set_defaults(func=cmd_doctor)
 
     st = sub.add_parser("start", help="run Medic in the background (watch, and optionally the dashboard)")
     st.add_argument("--interval", type=float, default=20)
