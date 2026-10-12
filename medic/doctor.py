@@ -132,7 +132,10 @@ def git_repo(proj) -> list[Check]:
     if not inside or inside.stdout.strip() != "true":
         return [Check("git", FAIL, f"{root} is not a git repository", "Medic bisects and fixes commits: `git init`")]
     head = _run(["git", "rev-parse", "--short", "HEAD"], cwd=root)
-    out.append(Check("git", OK, f"repository at {head.stdout.strip() if head else '?'}"))
+    sha = head.stdout.strip() if head and head.returncode == 0 else ""
+    out.append(Check("git", OK, f"repository at {sha}") if sha else
+               Check("git", WARN, "the repository has no commits yet",
+                     "commit your app: Medic finds the commit that broke it, and fixes on top of your history"))
     if proj.mode == "pr":
         from medic import delivery
         try:
