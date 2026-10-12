@@ -21,7 +21,8 @@ from pathlib import Path
 from medic import incidents, paths
 
 
-STARTUP_CHECK_S = 2       # how long start waits to see that Medic stays up
+STARTUP_CHECK_S = 60      # how long start waits for Medic to report it is watching
+READY = "[medic] watching workflow"
 
 
 def _run_file() -> Path:
@@ -168,7 +169,11 @@ def start(interval: float = 20, dashboard: int | None = None, host: str = "127.0
     _run_file().write_text(json.dumps(run, indent=1), encoding="utf-8")
     # A Medic that can't run (no medic.toml, a missing key, a bad config) exits at once: say so
     # now, with its last words, rather than report a start that didn't happen.
+    # Seen live: a fixed two-second wait reported "started" for a Medic that crashed while still
+    # importing. Wait for its own "watching" line instead (or its exit).
     for _ in range(STARTUP_CHECK_S * 10):
+        if READY in log.read_text(encoding="utf-8", errors="replace"):
+            break
         if not alive(pid):
             run["failed"] = tail(15)
             if ours(run.get("dashboard")):

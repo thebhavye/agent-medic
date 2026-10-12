@@ -10,7 +10,7 @@ from medic import paths, service
 PARENT = ("import subprocess, sys, time\n"
           "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
           "open(sys.argv[1], 'w').write(str(child.pid))\n"
-          "print('watching', flush=True)\n"
+          "print('[medic] watching workflow w every 20s', flush=True)\n"
           "time.sleep(120)\n")
 
 
@@ -92,3 +92,11 @@ def test_a_failed_start_leaves_no_dashboard_behind(tmp_path, monkeypatch):
     run = service.start(dashboard=8799)
     assert run["failed"] is not None
     assert wait_for(lambda: not service.alive(run["dashboard"]["pid"]))  # stopped with it
+
+
+def test_a_medic_that_dies_after_two_seconds_is_reported_failed(svc, monkeypatch):
+    # Seen live: Medic crashed while importing, after the old two-second check had said "started".
+    slow_crash = "import time; time.sleep(3); print('ModuleNotFoundError: seed_history'); raise SystemExit(1)"
+    monkeypatch.setattr(service, "command", lambda args: [sys.executable, "-c", slow_crash])
+    run = service.start()
+    assert "failed" in run and any("seed_history" in line for line in run["failed"])

@@ -20,7 +20,10 @@ from pathlib import Path
 
 from medic import paths
 
-NUMBER = re.compile(r"(?<![\w.])\d[\d,]*(?:\.\d+)?%?")
+# A number with its unit when it has one: "5 business days" is a fact where a bare "5" is too
+# common to check.
+NUMBER = re.compile(r"(?<![\w.])\d[\d,]*(?:\.\d+)?%?"
+                    r"(?: (?:business |working |calendar )?(?:days?|weeks?|months?|years?|hours?|minutes?)\b)?")
 NAME = re.compile(r"\b[A-Z][a-z]+(?:(?: (?:of|the|de|von|van) |[ -])[A-Z][a-z]+)+\b|\b[A-Z]{2,}\b"
                   r"|(?<=[a-z,;:] )[A-Z][a-z]{2,}\b")       # a single name mid-sentence ("in Narvik")
 QUOTED = re.compile(r"[\"“']([^\"”']{3,40})[\"”']")
@@ -147,11 +150,14 @@ def _answer(questions: list[str], runs: int) -> dict[str, list[dict]]:
     return {q: by_index.get(f"q{i}", []) for i, q in enumerate(questions)}
 
 
+AUTH_ERROR = re.compile(r"\b401\b|AuthenticationError|Unauthorized|invalid api key|incorrect api key", re.I)
+
+
 def from_questions(questions: list[str], log=print, runs: int = 5) -> list[dict]:
     """A new app: the current code answers each question `runs` times; the facts its answers agree on
     become the expected facts."""
     by_question = _answer(questions, runs)
-    cases = []
+    cases, errors = [], []
     for question in questions:
         answers = by_question.get(question, [])
         failed = next((r for r in answers if r.get("status") != "ok"), None)
@@ -162,11 +168,16 @@ def from_questions(questions: list[str], log=print, runs: int = 5) -> list[dict]
             continue
         if failed:                     # say why, so the user can fix the app or the question
             why = (failed.get("error") or "")[:160]
+            errors.append(why)
         elif texts and case(question, texts[0]):
             why = f"the answers disagree: {' / '.join(repr(t[:60]) for t in texts)}"
         else:
             why = f"no checkable facts in the answer: {(texts[0] if texts else '(none)')[:100]!r}"
         log(f"  skipped {question[:60]!r}: {why}")
+    if errors and len(errors) == len(questions) and all(AUTH_ERROR.search(e) for e in errors):
+        log("your app's model provider rejected its API key on every question (401). Medic runs your app "
+            "with its own .env: check the key the app reads there (for an OpenAI-compatible client, "
+            "OPENAI_API_KEY), and that it isn't still a placeholder.")
     return cases
 
 

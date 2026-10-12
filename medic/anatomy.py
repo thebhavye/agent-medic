@@ -210,18 +210,30 @@ def changed_surfaces(repo: Path, sha: str, surfaces: list[Surface]) -> dict:
     return {"surfaces": hit, "hunks": touched, "graph": graph_commit(repo, sha)}
 
 
-def _entire() -> str | None:
+ENTIRE_TIMEOUT_S = 60
+
+
+def _entire(repo: Path) -> str | None:
     return shutil.which("entire")
 
 
+def _run_entire(cmd: list[str]) -> subprocess.CompletedProcess | None:
+    """Entire's graph adds context; it must never sink a finding. Slow, missing or failing: None
+    (seen live: `entire graph commit` ran past its timeout and the regression finding was lost)."""
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                              timeout=ENTIRE_TIMEOUT_S)
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
 def graph_commit(repo: Path, sha: str) -> list[dict]:
-    exe = _entire()
+    exe = _entire(repo)
     if not exe:
         return []
-    proc = subprocess.run([exe, "graph", "commit", sha, "--json", "--repo", str(repo), "--max-seconds", "60"],
-                          capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180)
+    proc = _run_entire([exe, "graph", "commit", sha, "--json", "--repo", str(repo), "--max-seconds", "45"])
     try:
-        data = json.loads(proc.stdout)
+        data = json.loads(proc.stdout) if proc else {}
     except ValueError:
         return []
     return [{"file": f["path"], **c} for f in data.get("files", []) for c in f.get("changes", [])]
@@ -229,15 +241,15 @@ def graph_commit(repo: Path, sha: str) -> list[dict]:
 
 def graph_impact(repo: Path, symbol: str, file: str | None = None) -> str:
     """Entire graph's blast radius for a function, as compact text for the fixer's context."""
-    exe = _entire()
+    exe = _entire(repo)
     if not exe or not symbol:
         return ""
     cmd = [exe, "graph", "impact", "--symbol", symbol, "--repo", str(repo), "--depth", "1", "--limit", "8",
            "--format", "text"]
     if file:
         cmd += ["--file", file]
-    proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180)
-    return proc.stdout.strip()[:2500] if proc.returncode == 0 else ""
+    proc = _run_entire(cmd)
+    return proc.stdout.strip()[:2500] if proc and proc.returncode == 0 else ""
 
 
 def describe(surfaces: list[dict]) -> str:

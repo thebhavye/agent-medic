@@ -69,11 +69,26 @@ def load_entry(spec: str):
     return getattr(importlib.import_module(module), name)
 
 
+ANSWER_FIELDS = ("answer", "reply", "response", "output", "text", "content", "message")
+
+
 def text_of(result) -> str:
+    """The answer text from what the agent returned: a string, a dict, or a reply object such as a
+    web handler's pydantic model (`ChatReply(reply=...)`), never the object's repr."""
     if isinstance(result, str):
         return result
     if isinstance(result, dict):
-        return str(result.get("answer") or result.get("output") or result.get("text") or "")
+        return next((str(result[k]) for k in ANSWER_FIELDS if result.get(k)), "")
+    for k in ANSWER_FIELDS:
+        value = getattr(result, k, None)
+        if isinstance(value, str) and value:
+            return value
+    fields = getattr(result, "model_dump", None) or getattr(result, "__dict__", None)
+    data = fields() if callable(fields) else fields
+    if isinstance(data, dict):
+        texts = [v for v in data.values() if isinstance(v, str)]
+        if len(texts) == 1:                       # a reply object with one text field
+            return texts[0]
     return str(result or "")
 
 

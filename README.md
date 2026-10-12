@@ -30,8 +30,8 @@ Your agent is any Python function that answers one question. A RAG app, a suppor
 tool-using agent: `answer(question) -> str`.
 
 ```bash
-pipx install "agent-medic @ git+https://github.com/thebhavye/agent-medic.git"   # on your PATH everywhere
 cd your-app
+.venv/bin/pip install "agent-medic @ git+https://github.com/thebhavye/agent-medic.git"   # into your app's virtualenv
 agent-medic init               # dry run: shows the diff it would make
 agent-medic init --write
 ```

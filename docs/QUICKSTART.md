@@ -19,11 +19,15 @@ bot: `answer(question) -> str`.
 
 ## 1. Install
 
+Into your app's virtualenv, from your app's folder. Your app needs Medic's small runtime there
+anyway, so one install covers both:
+
 ```bash
-pipx install "agent-medic @ git+https://github.com/thebhavye/agent-medic.git"
+.venv/bin/pip install "agent-medic @ git+https://github.com/thebhavye/agent-medic.git"
 ```
 
-`pipx` puts `agent-medic` on your PATH in every terminal. `pip install` into a virtualenv works too.
+On Windows that's `.venv\Scripts\pip`. Activate the virtualenv (`source .venv/bin/activate`, or
+`.venv\Scripts\Activate.ps1` in PowerShell) and `agent-medic` works in that terminal.
 
 ## 2. Connect your app (one reviewable diff)
 
@@ -134,7 +138,7 @@ See "Use it on your agent" in the [README](../README.md) for `MEDIC_CONTROL`, `M
 
 ## Troubleshooting
 
-- **`agent-medic` isn't found:** install with `pipx`, or activate the virtualenv you installed it into.
+- **`agent-medic` isn't found:** activate your app's virtualenv (step 1), or run it as `.venv/bin/agent-medic`.
 - **Medic stops right after `start`:** `start` prints the end of its log. Run `agent-medic doctor`.
 - **The known-answer checks flap on healthy code:** re-run `evals bootstrap` with more runs
   (`--runs 7`), or remove a question whose right answer genuinely varies.

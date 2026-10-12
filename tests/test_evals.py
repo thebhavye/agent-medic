@@ -128,3 +128,17 @@ def test_identifiers_and_every_sampled_answer_survive():
     answers = [f"It says “word{i}”." for i in range(8)]
     c = evals.case("What does it say?", answers[0], tuple(answers[1:]), any_of=True)
     assert len(c["expect"][0]) == 8                                       # not capped at six
+
+
+def test_a_rejected_app_key_is_said_plainly(monkeypatch):
+    from medic import evals
+    err = "AuthenticationError: Error code: 401 - {'error': {'message': 'Unauthorized'}}"
+    monkeypatch.setattr(evals, "_answer", lambda qs, runs: {q: [{"status": "error", "error": err}] for q in qs})
+    said = []
+    assert evals.from_questions(["q1?", "q2?"], log=said.append) == []
+    assert "rejected its API key" in said[-1] and "OPENAI_API_KEY" in said[-1]
+
+
+def test_a_number_keeps_its_unit():
+    from medic import evals
+    assert evals.facts("Refunds arrive within 5 business days.", "How long does a refund take?") == [["5 business days"]]

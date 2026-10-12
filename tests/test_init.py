@@ -212,3 +212,22 @@ def test_a_pyproject_init_cannot_edit_safely_is_left_alone(tmp_path):
     plan, edits, _ = init_mod.run(tmp_path, write=True)
     assert (tmp_path / "pyproject.toml").read_text() == text and "pyproject.toml" not in edits
     assert "could not add the dependencies automatically" in init_mod.report(plan)
+
+
+def test_settings_in_default_arguments_and_f_strings(tmp_path):
+    # The support-bot shape: a setting as a default argument, and a prompt inside an f-string.
+    (tmp_path / "bot.py").write_text(
+        'from openai import OpenAI\n\nclient = OpenAI()\nTOP_K = 3\nSYSTEM_PROMPT = "Answer only from the FAQ."\n\n\n'
+        'def retrieve(question: str, k: int = TOP_K) -> list[str]:\n    return [question][:k]\n\n\n'
+        'def answer(question: str) -> str:\n'
+        '    faq = " ".join(retrieve(question))\n'
+        '    messages = [{"role": "system", "content": f"{SYSTEM_PROMPT} FAQ: {faq}"},\n'
+        '                {"role": "user", "content": question}]\n'
+        '    return client.chat.completions.create(model="m", messages=messages)\n')
+    plan, edits, _ = init_mod.run(tmp_path)
+    bot = edits["bot.py"]
+    # A default argument is evaluated once at import: first aid could never change it there.
+    assert "k: int = TOP_K)" in bot
+    # Inside a double-quoted f-string the name takes single quotes (a SyntaxError before 3.12 otherwise).
+    assert "f\"{medic.value('bot.system_prompt', SYSTEM_PROMPT)} FAQ" in bot
+    ast.parse(bot)

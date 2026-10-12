@@ -13,8 +13,16 @@ import httpx
 
 from medic import paths
 
-sys.path.insert(0, str(paths.ROOT / "scripts"))
-import seed_history  # noqa: E402
+
+
+
+def _seed_history():
+    """The demo's planted releases (scripts/seed_history.py in the agent-medic repo). Imported
+    only by the demo commands: an installed Medic watching a user's project has no scripts/."""
+    sys.path.insert(0, str(paths.ROOT / "scripts"))
+    import seed_history
+    return seed_history
+
 
 BENIGN = {"docs": 0, "timeout": 1, "careers": 3, "docstring": 4, "rename-title": 6}
 
@@ -46,11 +54,13 @@ def init(force: bool = False) -> str:
 
 
 def releases() -> dict:
+    seed_history = _seed_history()
     return {**{k: seed_history.STEPS[i]["message"].splitlines()[0] for k, i in seed_history.SCENARIOS.items()},
             **{k: seed_history.STEPS[i]["message"].splitlines()[0] for k, i in BENIGN.items()}}
 
 
 def release(name: str) -> str:
+    seed_history = _seed_history()
     index = seed_history.SCENARIOS.get(name, BENIGN.get(name))
     if index is None:
         raise KeyError(f"unknown release {name!r}; choose from {sorted(releases())}")
