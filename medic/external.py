@@ -25,6 +25,7 @@ from pathlib import Path
 
 import httpx
 
+from bisect_agent.edits import changed_lines
 from medic import paths
 
 TARGETS = {
@@ -267,7 +268,7 @@ def review(spec: dict, case: Case, edits: list[dict]) -> list[str]:
     """
     problems = []
     remedy = case.decision.get("remedy", {})
-    changed = sum(max(len(e["find"].splitlines()), len(e["replace"].splitlines())) for e in edits)
+    changed = changed_lines(edits)
     limit = MAX_LINES.get(remedy.get("kind"))
     if remedy.get("also"):
         limit = (limit or 0) + 6

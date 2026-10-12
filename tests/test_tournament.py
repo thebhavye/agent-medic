@@ -89,3 +89,22 @@ def test_soundness_runs_on_the_patched_file(tmp_path):
     assert tournament.soundness([{"path": "a.py", "find": "", "replace": ""}], tmp_path) == []
     (tmp_path / "a.py").write_text("import json\nx = json.not_a_function(1)\n")
     assert any("json.not_a_function" in p for p in tournament.soundness([{"path": "a.py"}], tmp_path))
+
+
+def test_quoting_a_whole_prompt_to_change_two_lines_is_proportionate(tmp_path):
+    # The real case: the fixer quotes the 12-line prompt template and restores two of its lines.
+    old = ["PROMPT = \"\"\"", "Answer using only the following context:", "", "{context}", "", "---", "",
+           "If the context does not state the answer, reply: Not in the documents.",
+           "Do not use outside knowledge or guess.", "", "Question: {question}", "\"\"\""]
+    new = old[:7] + ["Answer the question based on the above context: {question}", "\"\"\""]
+    (tmp_path / "query_data.py").write_text("\n".join(old) + "\n")
+    target = surface("prompt", "PROMPT", "query_data.py", 1, 12)
+    fix = [{"path": "query_data.py", "find": "\n".join(old), "replace": "\n".join(new)}]
+    assert tournament.review(fix, tmp_path, target) == []
+
+
+def test_changed_lines_counts_only_what_differs():
+    from bisect_agent.edits import changed_lines
+    assert changed_lines([{"find": "a\nb\nc", "replace": "a\nB\nc"}]) == 1
+    assert changed_lines([{"find": "a", "replace": "a\nb\nc"}]) == 2
+    assert changed_lines([{"find": "a\nb\nc\nd", "replace": "a"}]) == 3

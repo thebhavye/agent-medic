@@ -19,7 +19,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from bisect_agent import fixer, gitops
-from bisect_agent.edits import EditError, apply_edits
+from bisect_agent.edits import EditError, apply_edits, changed_lines
 from medic import anatomy, paths
 
 K = int(os.environ.get("MEDIC_CANDIDATES", 3))
@@ -88,7 +88,7 @@ def review(edits: list[dict], root: Path, target: dict, suspects: list[dict] | N
                     and not _names_target(e["find"], e["replace"], target):
                 problems.append(f"edits lines {span[0]}-{span[1]}, outside the target "
                                 f"{target['kind']} {target['name']} (lines {target['start']}-{target['end']})")
-    changed = sum(max(len(e["find"].splitlines()), len(e["replace"].splitlines())) for e in edits)
+    changed = changed_lines(edits)
     limit = LINE_LIMIT.get(target["kind"], 20)
     if changed > limit:
         problems.append(f"changes {changed} lines; a {target['kind']} fix should need about {limit}")
