@@ -50,6 +50,15 @@ def git(*args: str, cwd: Path, check: bool = True, timeout: float = GIT_TIMEOUT_
     return proc.stdout.strip()
 
 
+# Medic's own commits and merges on its fix branch skip the repo's git hooks. They are machine
+# commits whose checks are Medic's verification and the PR's CI; a developer's hook (a linter
+# asking a question, a session tracker waiting on its agent) can hang or block them.
+NO_HOOKS = ("-c", "core.hooksPath=/dev/null/no-hooks")
+
+
+def commit(message: str, cwd: Path) -> None:
+    git(*NO_HOOKS, "commit", "-q", "-m", message, cwd=cwd)
+
 def rev_parse(rev: str, repo: Path) -> str:
     return git("rev-parse", "--verify", f"{rev}^{{commit}}", cwd=repo)
 

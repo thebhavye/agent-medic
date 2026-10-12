@@ -216,7 +216,7 @@ class Orchestrator:
 
         if verdict == "good" and not collateral:
             gitops.git("add", "-A", cwd=self.fix_root)
-            gitops.git("commit", "-m", self._commit_message(inv, attempt, cand), cwd=self.fix_root)
+            gitops.commit(self._commit_message(inv, attempt, cand), cwd=self.fix_root)
             st.fix_tip = gitops.rev_parse("HEAD", self.fix_root)
             inv.fix_commit = st.fix_tip
             attempt["accepted"] = True
