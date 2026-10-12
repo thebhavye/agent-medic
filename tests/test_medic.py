@@ -120,7 +120,9 @@ def test_release_is_healthy_only_after_its_own_canary(tmp_path, monkeypatch):
     wt.state["canary"].append({"release": "newrelease12", "pass_rate": 0.0})
     assert not wt._answers_verified("newrelease123")          # canary failed on it
     wt.state["canary"].append({"release": "newrelease12", "pass_rate": 1.0})
-    assert wt._answers_verified("newrelease123")
+    assert not wt._answers_verified("newrelease123")          # one lucky pass after a failure
+    wt.state["canary"].append({"release": "newrelease12", "pass_rate": 1.0})
+    assert wt._answers_verified("newrelease123")              # two in a row
 
 
 def test_no_canary_baseline_still_requires_a_passing_score(tmp_path, monkeypatch):
@@ -129,5 +131,17 @@ def test_no_canary_baseline_still_requires_a_passing_score(tmp_path, monkeypatch
     wt = w.Watcher(reader=None, log=lambda m: None)
     wt.state.update(canary=[{"release": "rel000000000", "pass_rate": 0.0}], canary_baseline=None)
     assert not wt._answers_verified("rel000000000")
-    wt.state["canary"].append({"release": "rel000000000", "pass_rate": 0.9})
+    wt.state["canary"] += [{"release": "rel000000000", "pass_rate": 0.9}, {"release": "rel000000000", "pass_rate": 0.8}]
     assert wt._answers_verified("rel000000000")
+
+
+def test_a_flaky_broken_release_is_never_promoted_by_one_lucky_run(tmp_path, monkeypatch):
+    # Live: the broken support-bot prompt scored 20-60% for an hour, then 80% once.
+    from medic import paths, watcher as w
+    monkeypatch.setattr(paths, "STATE", tmp_path / "state.json")
+    wt = w.Watcher(reader=None, log=lambda m: None)
+    runs = [0.6, 0.4, 0.2, 0.4, 0.8, 0.4]
+    wt.state.update(canary=[{"release": "841b4eba76e7", "pass_rate": r} for r in runs[:5]], canary_baseline=1.0)
+    assert not wt._answers_verified("841b4eba76e7")
+    wt.state["canary"].append({"release": "841b4eba76e7", "pass_rate": runs[5]})
+    assert not wt._answers_verified("841b4eba76e7")
