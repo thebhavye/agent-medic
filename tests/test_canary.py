@@ -119,3 +119,11 @@ def test_run_without_results_records_error(tmp_path, monkeypatch):
     record = canary.run(state, log=lambda *a: None)
     assert "pass_rate" not in record and "error" in record
     assert state.get("canary_baseline") is None
+
+
+def test_a_new_release_in_production_is_checked_right_away(monkeypatch):
+    import time
+    state = {"canary": [{"at": time.time(), "release": "a"}], "canary_release_tag": "aaaaaaaaaaaa"}
+    assert canary.due(state, "aaaaaaaaaaaa") is False          # same release, interval not up
+    assert canary.due(state, "bbbbbbbbbbbb") is True           # a deploy: check it now
+    assert canary.due(state) is False                          # no traces yet: the interval rules

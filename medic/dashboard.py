@@ -211,7 +211,8 @@ def build_state(medic_dir: Path) -> dict:
     # Health numbers use exactly the traces Medic decides on: the watcher's stored order, last
     # RECENT. The chart gets its own sample, sorted by start time and capped.
     stored = [slim_trace(t) for t in state.get("traces") or [] if isinstance(t, dict)]
-    if not (deploy / ".git").exists() and (medic_dir.parent / "medic.toml").exists():
+    project = not (deploy / ".git").exists() and (medic_dir.parent / "medic.toml").exists()
+    if project:
         # A user's project: the repo holds .medic/, and production is wherever they deploy it,
         # so the live release is the one its newest traces carry.
         deploy = medic_dir.parent
@@ -283,7 +284,7 @@ def build_state(medic_dir: Path) -> dict:
     canary_runs = [{"at": r.get("at"), "release": (r.get("release") or "")[:12], "pass_rate": r.get("pass_rate"),
                     "n": r.get("n")} for r in state.get("canary") or [] if isinstance(r, dict)]
     return {
-        "generated_at": time.time(), "source": medic_dir.name,
+        "generated_at": time.time(), "source": medic_dir.name, "project": project,
         "deploy": {"sha": head, "subject": (commits.get(head) or {}).get("subject", ""),
                    "at": (commits.get(head) or {}).get("at")} if head else None,
         "releases": release_info, "rollout": rollout,

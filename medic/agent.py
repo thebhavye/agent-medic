@@ -59,8 +59,10 @@ class Medic:
         if healed:
             signals = [*signals, Signal("self_healed", "self_healed_rate", 0.0, len(healed) / len(recent))]
         # Wrong-but-confident answers leave no trace signal; the canary eval catches them.
-        if self.watcher.state.get("baseline") and canary.due(self.watcher.state):
+        tag = recent[-1].release if recent else ""
+        if self.watcher.state.get("baseline") and canary.due(self.watcher.state, tag):
             live = self._live_release()
+            self.watcher.state["canary_release_tag"] = tag
             canary.run(self.watcher.state, self.log, code_dir=self._release_dir(live), sha=live)
             if canary.needs_confirm(self.watcher.state):
                 self.log(f"[medic] canary below the bar on {live[:8]}: running the questions again to confirm")
@@ -445,9 +447,28 @@ class Medic:
                                  + ("no safe automatic fix, a human is paged" if inc.phase == "escalated"
                                     else f"remedy: {d['remedy'].replace('_', ' ')}"), root_cause=proven)
         if inc.phase == "escalated":
-            inc.note("escalated", "no safe automatic fix for this cause; paging a human", self.log)
+            inc.note("escalated", self._why_escalated(inc), self.log)
+            # Users first, even without a diagnosis: when a new release broke a healthy one, stand in
+            # the healthy release's parts. First aid proves itself on the known-answer eval before
+            # it goes live, so a cause the code can't fix (an outage, a quota) just gets no first aid.
+            if inc.release and inc.healthy_release and inc.release[:12] != inc.healthy_release[:12]:
+                self._first_aid(inc)
         elif d.get("cause") == "code_regression":
             self._first_aid(inc)
+
+    def _why_escalated(self, inc: Incident) -> str:
+        """Paging a human with the reason and the evidence so far, not just "no safe fix"."""
+        d = inc.decision
+        broken = [f"{n} investigator failed ({f.get('detail', '')[:160]})" for n, f in inc.findings.items()
+                  if f.get("verdict") == "error"]
+        reg = inc.findings.get("regression") or {}
+        evidence = []
+        for key, label in (("good_release_today", inc.healthy_release), ("bad_release_today", inc.release)):
+            m = reg.get(key) or {}
+            if "pass_rate" in m:
+                evidence.append(f"{(label or '')[:8]} passes {m['pass_rate']:.0%}")
+        why = "; ".join(broken) or f"cause {d.get('cause', 'unknown').replace('_', ' ')} has no safe automatic fix"
+        return (f"paging a human: {why}" + (f"; evidence so far: {', '.join(evidence)}" if evidence else ""))
 
     def _first_aid(self, inc: Incident) -> None:
         """Serve users with the culprit's healthy parts while the cure is made (medic/first_aid.py).

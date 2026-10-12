@@ -20,8 +20,13 @@ INTERVAL_S = float(os.environ.get("MEDIC_CANARY_INTERVAL_S", 600))
 DROP = 0.25          # pass-rate drop vs the canary baseline that counts as a regression
 
 
-def due(state: dict) -> bool:
+def due(state: dict, release_tag: str = "") -> bool:
+    """Time for the known-answer eval: the interval has passed, or production's traces carry a
+    release the eval hasn't run on yet. A bad deploy is the commonest break, so it gets checked
+    as soon as it serves traffic, not at the next interval."""
     runs = state.get("canary", [])
+    if release_tag and release_tag != state.get("canary_release_tag"):
+        return True
     return not runs or time.time() - runs[-1]["at"] >= INTERVAL_S
 
 

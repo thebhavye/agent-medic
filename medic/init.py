@@ -224,8 +224,10 @@ def scan(root: Path) -> Plan:
         if not consts:
             continue
         for name in sorted(consts):
+            # Only uses in the function's body: a default argument (`k=TOP_K`) or a decorator is
+            # evaluated once, when the module loads, so first aid could never change it there.
             loads = [n for f in path_funcs if f.file == rel and name not in _local_names(f.node)
-                     for n in ast.walk(f.node)
+                     for stmt in f.node.body for n in ast.walk(stmt)
                      if isinstance(n, ast.Name) and n.id == name and isinstance(n.ctx, ast.Load)
                      and id(n) not in _already_wrapped(f.node)]
             if loads:
@@ -318,6 +320,18 @@ def _instrumentations_arg(root: Path) -> str:
     return ",\n                  instrumentations=[" + ", ".join(f'"{n}"' for n in names) + "]"
 
 
+def _fstring_quote(tree: ast.Module, lines: list[str], lineno: int, col: int) -> str | None:
+    """The quote character of the innermost f-string around (lineno, col), or None."""
+    best = None
+    for n in ast.walk(tree):
+        if isinstance(n, ast.JoinedStr) and (n.lineno, n.col_offset) <= (lineno, col) <= (n.end_lineno, n.end_col_offset):
+            if best is None or (n.lineno, n.col_offset) > (best.lineno, best.col_offset):
+                best = n
+    if best is None:
+        return None
+    opening = lines[best.lineno - 1][best.col_offset:].lstrip("rRbBfFuU")
+    return opening[:1] or None
+
 def build_edits(plan: Plan, workflow: str) -> dict[str, str]:
     """file -> new text, for every file the plan touches."""
     if plan.entrypoint is None:
@@ -338,7 +352,10 @@ def build_edits(plan: Plan, workflow: str) -> dict[str, str]:
         for lineno, start, end, name in loads:
             line = lines[lineno - 1]
             if line[start:end] == name:
-                lines[lineno - 1] = line[:start] + f'medic.value("{_value_name(rel, name)}", {name})' + line[end:]
+                # Inside an f-string, the name's quotes must differ from the f-string's own:
+                # reusing them is a SyntaxError before Python 3.12.
+                q = "'" if _fstring_quote(tree, lines, lineno, start) == '"' else '"'
+                lines[lineno - 1] = line[:start] + f'medic.value({q}{_value_name(rel, name)}{q}, {name})' + line[end:]
         # 2. new lines, all placed by the original line numbers and inserted bottom up
         inserts = []                        # (0-based index, text)
         marks = [(plan.entrypoint.node, "@medic.entrypoint")] if plan.entrypoint.file == rel else []

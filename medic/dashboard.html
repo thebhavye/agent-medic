@@ -197,6 +197,25 @@ details[open]>summary::before{transform:rotate(90deg)}
 .empty b{display:block;color:var(--ink);font-size:17px;margin-bottom:6px}
 .view{display:none} .view.on{display:block}
 footer{color:var(--faint);font-size:12px;text-align:center;padding:10px 0 40px}
+
+/* Desktop: use the screen and read comfortably (it was small, with wide empty margins) */
+@media (min-width:1100px){
+  body{font-size:15.5px}
+  .wrap{max-width:min(1600px,94vw);padding:0 32px}
+  .top .wrap{height:64px} .brand{font-size:17px} nav a{font-size:15px;padding:7px 14px} .top .right{font-size:13px}
+  .hero{padding:36px 0 26px;gap:22px} .hero h1{font-size:38px;max-width:44ch} .status{font-size:13px}
+  .kpi .v{font-size:30px} .kpi .l,.kpi .d{font-size:13px}
+  .card>.hd h2{font-size:18px} .card>.hd .note{font-size:14px}
+  .chart text{font-size:12.5px} .legend{font-size:13.5px}
+  .stage h3{font-size:18px} .stage h3 .took{font-size:13px} .stage .num{width:36px;height:36px;font-size:15px}
+  .box h4{font-size:13px} .sig{font-size:15px} .sig .m{font-size:14px} .qa .a{font-size:14.5px} .qa .x{font-size:14px}
+  code,.mono{font-size:13.5px} .sha{font-size:13px} .chip{font-size:12.5px}
+  .inv .who small{font-size:12.5px} .bar{font-size:13px} .verdict .big{font-size:16px} .verdict ul{font-size:14.5px}
+  table{font-size:14.5px} th{font-size:12.5px} .log{font-size:13.5px} .diff{font-size:13px} .diff .path{font-size:12.5px}
+  details>summary{font-size:14px} .intent{font-size:14.5px} .empty b{font-size:19px} footer{font-size:13px}
+  .rail .st{font-size:13px} .rail .st .t{font-size:12px} .tip{font-size:13px;max-width:400px}
+}
+@media (min-width:1800px){body{font-size:16.5px} .hero h1{font-size:42px} .kpi .v{font-size:34px}}
 .runs{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
 .attempt{padding:12px 0;border-top:1px dashed var(--line)}
 .attempt:first-child{border-top:0;padding-top:0}
@@ -374,7 +393,8 @@ function renderLive(root){
 
   if (inc) root.appendChild(caseFile(inc));
   else root.appendChild(card("Incidents", null, h("div", {class:"empty"}, h("b", null, "No incidents yet"),
-    "Medic is watching production traces. Break something with ", h("code", null, "agent-medic world chaos"), " or a bad release.")));
+    DATA.project ? "Medic is watching your production traces, and asks your known-answer questions on every new release."
+      : h("span", null, "Medic is watching production traces. Break something with ", h("code", null, "agent-medic world chaos"), " or a bad release."))));
 }
 function silentNote(inc){
   // Only when the known-answer eval was the sole signal and no trace on the broken release failed.
@@ -383,7 +403,7 @@ function silentNote(inc){
   var broken = String(inc.release || "").slice(0, 12);
   var onBroken = ((DATA.production || {}).traces || []).filter(function(t){ return t.release === broken; });
   if (!onBroken.length || onBroken.some(function(t){ return t.failed || t.tool_errors; })) return null;
-  return h("p", {class:"muted", style:"font-size:12.5px;margin:10px 0 0;padding:8px 12px;border-radius:8px;background:var(--sunk)"},
+  return h("p", {class:"muted", style:"font-size:0.893em;margin:10px 0 0;padding:8px 12px;border-radius:8px;background:var(--sunk)"},
     h("b", {style:"color:var(--ink)"}, "A silent failure. "), "Every trace on the broken release finished without an error, but the answers were wrong. "
     + "Trace metrics alone would have missed it; Medic's known-answer eval caught it.");
 }
@@ -509,7 +529,7 @@ function took(inc, a, b){ var ta = phaseT(inc, a), tb = phaseT(inc, b); return t
 function caseFile(inc){
   var list = DATA.incidents || [];
   var picker = list.length > 1 ? h("select", {"aria-label":"choose incident", onchange:function(e){ location.hash = "#live/" + encodeURIComponent(e.target.value); },
-      style:"font:inherit;font-size:12.5px;padding:3px 6px;border-radius:7px;border:1px solid var(--line);background:var(--panel);color:var(--ink)"},
+      style:"font:inherit;font-size:0.893em;padding:3px 6px;border-radius:7px;border:1px solid var(--line);background:var(--panel);color:var(--ink)"},
     list.map(function(i){ var o = h("option", {value:i.id}, i.id + " · " + (PHASE_LABEL[i.phase] || i.phase)); if (i.id === inc.id) o.selected = true; return o; })) : null;
   var total = inc.ended_at ? "healed in " + dur(inc.ended_at - inc.opened_at) : since(inc.opened_at, "open for ", "");
   if (inc.phase === "escalated") total = "escalated after " + dur(inc.ended_at - inc.opened_at);
@@ -543,14 +563,14 @@ function detectStage(inc){
     inc.symptom || "Production signals moved away from the healthy baseline.",
     h("div", null, neatlogsAlert(inc),
     h("div", {class:"grid2"}, h("div", {class:"box"}, h("h4", null, "What moved"), sigs.length ? sigs : h("span", {class:"muted"}, "—"),
-      inc.healthy_release ? h("div", {class:"x muted", style:"font-size:12.5px;margin-top:8px"}, "last healthy release ", sha(inc.healthy_release), " · now on ", sha(inc.release)) : null), exBox)));
+      inc.healthy_release ? h("div", {class:"x muted", style:"font-size:0.893em;margin-top:8px"}, "last healthy release ", sha(inc.healthy_release), " · now on ", sha(inc.release)) : null), exBox)));
 }
 function neatlogsAlert(inc){
   var a = (inc.neatlogs || {}).alert;
   if (!a) return null;
   return h("div", {class:"box", style:"margin-bottom:12px;border-color:var(--accent)"}, h("h4", null, "Raised by neatlogs"),
     h("div", null, h("b", null, a.ruleName || "alert"), a.detectionName ? h("span", {class:"muted"}, " · detection “" + a.detectionName + "”") : null),
-    h("div", {class:"faint", style:"font-size:12.5px;margin-top:4px"}, (a.count != null ? a.count + " hits" : "") +
+    h("div", {class:"faint", style:"font-size:0.893em;margin-top:4px"}, (a.count != null ? a.count + " hits" : "") +
       (a.windowMinutes ? " in " + a.windowMinutes + " min" : "") + " · fired " + (a.firedAt ? new Date(a.firedAt).toLocaleTimeString() : "") +
       " · " + ((inc.neatlogs.sample_trace_ids || []).length) + " sample traces"));
 }
@@ -563,9 +583,9 @@ function diagnoseStage(inc){
       if (f.before && f.after) extra.push(h("div", {class:"bars"},
         bar("healthy", f.before.pass_rate, "var(--ok)"), bar("culprit", f.after.pass_rate, "var(--bad)")));
       if (f.tested && f.tested.length) extra.push(h("div", {class:"commits", title:"releases the bisection tested"},
-        h("span", {class:"faint", style:"font-size:12px"}, "bisected " + f.tested.length + " releases:"),
+        h("span", {class:"faint", style:"font-size:0.857em"}, "bisected " + f.tested.length + " releases:"),
         f.tested.map(function(t){ return sha(t[0], t[0] === f.culprit ? "culprit" : t[1]); })));
-      if (f.surfaces && f.surfaces.length) extra.push(h("div", {class:"faint", style:"font-size:12px;margin-top:6px"}, "changed: " + f.surfaces.join(", ")));
+      if (f.surfaces && f.surfaces.length) extra.push(h("div", {class:"faint", style:"font-size:0.857em;margin-top:6px"}, "changed: " + f.surfaces.join(", ")));
     }
     if (f.name === "localize") {
       (f.divergences || []).slice(0, 2).forEach(function(d){
@@ -577,20 +597,20 @@ function diagnoseStage(inc){
             bar("failing", n.median_now / mx, "var(--bad)", n.median_now)));
         }
       });
-      if (f.healthy != null) extra.push(h("div", {class:"faint", style:"font-size:12px;margin-top:6px"},
+      if (f.healthy != null) extra.push(h("div", {class:"faint", style:"font-size:0.857em;margin-top:6px"},
         "compared " + f.healthy + " healthy with " + f.failing + " failing traces step by step"));
     }
     return h("div", {class:"inv"},
       h("div", {class:"who"}, words(f.name), h("small", null, {dependency:"is the API still the same?", regression:"which release broke it?", localize:"where do traces diverge?", loops:"is it stuck retrying?", neatlogs:"what does neatlogs' investigation say?"}[f.name] || "")),
       h("div", null, chip(words(f.verdict), verdictKind(f.verdict)), f.confidence != null ? h("div", {class:"meter", title:"confidence " + pct(f.confidence)}, h("i", {style:"width:" + pct(f.confidence)})) : null,
-        f.confidence != null ? h("div", {class:"faint", style:"font-size:11.5px"}, pct(f.confidence) + " confident") : null),
+        f.confidence != null ? h("div", {class:"faint", style:"font-size:0.821em"}, pct(f.confidence) + " confident") : null),
       h("div", null, f.detail, extra));
   });
   var dec = inc.decision || {};
   var verdict = dec.cause ? h("div", {class:"verdict"},
     h("div", {class:"big"}, "Diagnosis: " + words(dec.cause) + "  →  " + words(dec.remedy), h("span", {class:"muted", style:"font-weight:500"}, "  ·  " + pct(dec.confidence) + " confidence")),
     h("ul", null, (dec.rationale || []).map(function(r){ return h("li", {class: /agree|confirm/.test(r) ? "agree" : null}, r); })),
-    (dec.disagreements || []).length ? h("div", {style:"margin-top:6px;color:var(--warn);font-size:13px"}, "disagreements: " + dec.disagreements.join("; ")) : null) : null;
+    (dec.disagreements || []).length ? h("div", {style:"margin-top:6px;color:var(--warn);font-size:0.929em"}, "disagreements: " + dec.disagreements.join("; ")) : null) : null;
   return stage(2, stateOf(inc, "triaged", "decided"), "Diagnosed", took(inc, "triaged", "decided"),
     (inc.investigators || []).length ? (inc.investigators.length + " investigators ran in parallel on the failing traces, then a coordinator weighed their evidence.") : "Waiting for investigators.",
     h("div", null, rows, verdict));
@@ -622,14 +642,14 @@ function firstAidStage(inc){
     error: "First aid failed; the cure goes ahead."}[status] || "";
   var body = [];
   if (fa.what && fa.what !== "nothing") body.push(h("div", {class:"box sunk"}, h("h4", null, "Stood in"), fa.what,
-    fa.base ? h("div", {class:"faint", style:"font-size:12px;margin-top:4px"}, ["from ", sha(fa.base), ", the culprit's parent: nothing else that shipped with it is undone"]) : null));
+    fa.base ? h("div", {class:"faint", style:"font-size:0.857em;margin-top:4px"}, ["from ", sha(fa.base), ", the culprit's parent: nothing else that shipped with it is undone"]) : null));
   if (trial.pass_rate != null) body.push(h("div", {class:"bars", style:"max-width:520px;margin-top:10px"},
     before.pass_rate != null ? bar("without", before.pass_rate, "var(--bad)") : null,
     bar("with it", trial.pass_rate, trial.pass_rate >= .75 ? "var(--ok)" : "var(--bad)"),
-    h("div", {class:"faint", style:"font-size:12px"}, "known-answer eval on the broken release" +
+    h("div", {class:"faint", style:"font-size:0.857em"}, "known-answer eval on the broken release" +
       (trial.tool_calls_per_run != null && before.tool_calls_per_run != null ? " · tool calls per run " +
         (+before.tool_calls_per_run).toFixed(1) + " → " + (+trial.tool_calls_per_run).toFixed(1) : ""))));
-  if (fa.reason) body.push(h("p", {class:"muted", style:"font-size:13px;margin:8px 0 0"}, fa.reason));
+  if (fa.reason) body.push(h("p", {class:"muted", style:"font-size:0.929em;margin:8px 0 0"}, fa.reason));
   if (status === "active") body.push(h("div", {class:"outcome warn"}, h("span", {class:"ic"}, "+"),
     h("span", null, "Active on ", sha(inc.release), h("span", {class:"muted", style:"font-weight:400"},
       " · bound to that release, signed, expires " + clock(fa.expires_at)))));
@@ -665,10 +685,10 @@ function repairStage(inc){
       + cands.filter(function(c){ return !c.winner; }).map(function(c){ return c.verdict === "passed" ? "“" + c.title + "” also passed but works around the cause (" + c.lines + " lines)." : "“" + c.title + "” was rejected: " + c.reason + "."; }).join(" ") : null;
     return h("div", {class:"attempt"},
       h("div", {style:"display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;margin-bottom:8px"}, h("b", null, "Attempt " + a.n),
-        chip(a.accepted ? "verified" : "rejected", a.accepted ? "ok" : "bad"), a.model ? h("span", {class:"faint", style:"font-size:12px"}, "fixer " + a.model) : null,
-        a.commit ? h("span", {class:"faint", style:"font-size:12px"}, ["commit ", sha(a.commit)]) : null),
-      tbl, why ? h("p", {class:"muted", style:"font-size:13px;margin:10px 0 0"}, why) : null,
-      !cands.length && a.feedback ? h("p", {class:"muted", style:"font-size:13px;margin:0"}, a.feedback) : null,
+        chip(a.accepted ? "verified" : "rejected", a.accepted ? "ok" : "bad"), a.model ? h("span", {class:"faint", style:"font-size:0.857em"}, "fixer " + a.model) : null,
+        a.commit ? h("span", {class:"faint", style:"font-size:0.857em"}, ["commit ", sha(a.commit)]) : null),
+      tbl, why ? h("p", {class:"muted", style:"font-size:0.929em;margin:10px 0 0"}, why) : null,
+      !cands.length && a.feedback ? h("p", {class:"muted", style:"font-size:0.929em;margin:0"}, a.feedback) : null,
       edits.length ? keyedDetails("diff:" + inc.id + ":" + a.n, a.accepted ? "The fix (" + edits.length + " edit" + (edits.length > 1 ? "s" : "") + ")" : "The rejected change", diffView(edits), a.accepted) : null,
       a.accepted && (a.intent || a.intent_kept) ? h("div", {class:"intent"},
         h("div", {class:"box sunk"}, h("h4", null, "Why the original change was made"), a.intent),
@@ -707,6 +727,8 @@ function prStage(inc){
 
 function canaryStage(inc){
   if (inc.pr && (inc.pr.ready || inc.pr.url)) return prStage(inc);
+  if (DATA.project) return stage(5, inc.phase === "escalated" ? "fail" : "pending", "Pull request", null,
+    inc.phase === "escalated" ? "No verified fix to propose." : "Once a fix is verified, Medic prepares it as a pull request on your repo.", null);
   var c = inc.canary || {}, ro = c.rollout || (DATA.rollout && DATA.rollout.incident === inc.id ? DATA.rollout : null);
   var v = c.verdict, st = stateOf(inc, "canary", "deployed");
   if (!ro && !c.deployed) {
@@ -748,11 +770,12 @@ function healStage(inc){
   var done = inc.phase === "resolved";
   var notes = (inc.neatlogs || {}).notes || [];
   var written = notes.length ? h("div", {class:"box sunk", style:"margin-top:4px"}, h("h4", null, "Written back to neatlogs"),
-    notes.map(function(n){ return h("div", {style:"font-size:13px;padding:2px 0"}, h("span", {class:"mono faint"}, clock(n.at) + " "), n.text,
+    notes.map(function(n){ return h("div", {style:"font-size:0.929em;padding:2px 0"}, h("span", {class:"mono faint"}, clock(n.at) + " "), n.text,
       h("span", {class:"faint"}, n.card ? " · added to neatlogs' fix card" : " · in Medic's neatlogs traces")); }),
-    inc.neatlogs.suggestion_resolved ? h("div", {style:"font-size:13px;margin-top:4px;color:var(--ok)"}, "neatlogs fix suggestion marked resolved") : null) : null;
+    inc.neatlogs.suggestion_resolved ? h("div", {style:"font-size:0.929em;margin-top:4px;color:var(--ok)"}, "neatlogs fix suggestion marked resolved") : null) : null;
   return stage(6, done ? "done" : reached(inc, "deployed") ? "now" : "pending", "Healed", took(inc, "deployed", "resolved"),
-    done ? "After promotion Medic kept watching: " + (m.n || 0) + " production traces at a " + pct(m.failure_rate) + " failure rate. Incident closed."
+    done ? (DATA.project ? "On the release with the fix" : "After promotion") + " Medic kept watching: " + (m.n || 0) + " production traces at a " + pct(m.failure_rate) + " failure rate. Incident closed."
+         : DATA.project ? "After you merge and deploy the fix, Medic watches the new release in production and closes the incident, or opens a revert."
          : "After promotion Medic keeps watching production before closing the incident.", written);
 }
 
@@ -807,8 +830,8 @@ function renderWorld(root){
       return h("div", {class:"attempt"},
         h("div", {style:"display:flex;gap:8px;align-items:baseline;flex-wrap:wrap"}, h("b", null, "Attempt " + a.n), chip(a.verdict, a.verdict === "accepted" ? "ok" : a.verdict === "blocked" ? "warn" : "bad"),
           h("span", null, a.title)),
-        h("p", {class:"muted", style:"font-size:13px;margin:6px 0 0"}, a.feedback),
-        (a.review || []).length ? h("ul", {style:"margin:6px 0;font-size:13px;color:var(--bad)"}, a.review.map(function(r){ return h("li", null, r); })) : null,
+        h("p", {class:"muted", style:"font-size:0.929em;margin:6px 0 0"}, a.feedback),
+        (a.review || []).length ? h("ul", {style:"margin:6px 0;font-size:0.929em;color:var(--bad)"}, a.review.map(function(r){ return h("li", null, r); })) : null,
         (a.runs || []).length ? h("div", {class:"runs"}, a.runs.map(function(r){ return chip((r.status || "exit " + r.exit) + " · " + (r.topic || ""), r.exit === 0 ? "ok" : "bad"); })) : null,
         a.edits.length ? keyedDetails("ext:" + c.id + ":" + a.n, "Change (" + a.edits.reduce(function(s, e){ return s + e.lines.filter(function(l){ return l[0] === "+" || l[0] === "-"; }).length; }, 0) + " changed lines)", diffView(a.edits), a.verdict === "accepted") : null);
     });

@@ -71,10 +71,18 @@ def investigate(deploy: Path, good: str, bad: str, signal: str, cases: Path, rea
     if not result.culprit:
         return {**finding, "verdict": "ambiguous", "confidence": 0.4,
                 "detail": "skipped releases hide the boundary: " + ", ".join(c[:8] for c in result.candidates)}
-    intent = entire_ctx.gather_intent(result.culprit, deploy, deploy)
-    surfaces = anatomy.scan(deploy, [f for f in paths.AGENT_FILES if (deploy / f).exists()])
-    changed = anatomy.changed_surfaces(deploy, result.culprit, surfaces)
+    # The bisect has proven the culprit. What follows is context for the fixer (why the commit
+    # was made, which parts it touched); its failing must never cost the finding.
+    intent, changed, context_error = {}, {"surfaces": [], "graph": []}, None
+    try:
+        intent = entire_ctx.gather_intent(result.culprit, deploy, deploy)
+        surfaces = anatomy.scan(deploy, [f for f in paths.AGENT_FILES if (deploy / f).exists()])
+        changed = anatomy.changed_surfaces(deploy, result.culprit, surfaces)
+    except Exception as exc:  # noqa: BLE001
+        context_error = f"{type(exc).__name__}: {exc}"[:300]
+        log(f"[medic] regression: culprit proven, but its context failed: {context_error}")
     return {**finding, "verdict": "culprit", "confidence": 0.9, "signature": reg.signature,
+            "context_error": context_error,
             "changed_surfaces": changed["surfaces"], "graph_changes": changed["graph"],
             "good_value": reg.good_value, "bad_value": reg.bad_value, "culprit": result.culprit,
             "culprit_subject": gitops.subject(result.culprit, deploy), "verdicts": verdicts, "intent": intent,
