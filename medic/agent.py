@@ -495,6 +495,16 @@ class Medic:
         if record["accepted"]:
             inc.remedy.update(branch=record["branch"], commit=record["commit"])
             inc.phase = "remedied"
+        elif record["n"] >= remedy.MAX_ATTEMPTS and (restored := remedy.restore_attempt(inc, self.reader, self.log)):
+            inc.remedy["attempts"].append(restored)
+            inc.note("remedy", f"restore: {'accepted' if restored['accepted'] else 'rejected'}: "
+                               f"{restored.get('feedback', '')}", self.log)
+            if restored["accepted"]:
+                inc.remedy.update(branch=restored["branch"], commit=restored["commit"])
+                inc.phase = "remedied"
+            else:
+                inc.phase = "escalated"
+                inc.note("escalated", f"no verified fix after {remedy.MAX_ATTEMPTS} attempts and a restore", self.log)
         elif record["n"] >= remedy.MAX_ATTEMPTS:
             inc.phase = "escalated"
             inc.note("escalated", f"no verified fix after {remedy.MAX_ATTEMPTS} attempts", self.log)

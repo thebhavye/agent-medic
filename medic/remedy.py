@@ -6,6 +6,7 @@ questions against the *current* knowledge-base API. Only a verified fix is deplo
 """
 
 import json
+import re
 from pathlib import Path
 
 import httpx
@@ -206,6 +207,75 @@ def _tournament_attempt(inc, reader, root: Path, branch: str, n: int, base_promp
     record.update(accepted=True, commit=gitops.rev_parse("HEAD", root), branch=branch, metrics=m, winner=label,
                   feedback=f"tournament: {label} won (pass {m['pass_rate']:.0%}, {w['changed_lines']} lines) over "
                            + (", ".join(f"{tournament._label(c)} [{c['verdict']}]" for c in others) or "no rivals"))
+    return record
+
+
+def _changed_spans(healthy: str, live: str, file: str) -> list[tuple[int, int]]:
+    """The line spans (in the live file) where `file` differs between the two releases."""
+    out = gitops.git("diff", "-U0", healthy, live, "--", file, cwd=paths.DEPLOY)
+    spans = []
+    for m in re.finditer(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", out, re.M):
+        start, count = int(m.group(1)), int(m.group(2) or 1)
+        spans.append((start, start + max(count, 1) - 1))
+    return spans
+
+
+def restore_attempt(inc, reader, log=print) -> dict | None:
+    """The last resort before paging a human: undo the culprit's change to the surfaces first aid pinned.
+
+    First aid already proved that the healthy value of those surfaces fixes production. When no
+    written fix passes, a fix PR that restores exactly that is better than none, as long as the
+    culprit changed nothing else in those files (the restore can't take an unrelated change with
+    it) and it verifies like any other fix. None when this doesn't apply."""
+    fa, healthy = inc.first_aid or {}, (inc.first_aid or {}).get("base") or inc.healthy_release
+    pinned = set(fa.get("values", [])) | set(fa.get("functions", []))
+    trial = fa.get("trial") or {}
+    if not pinned or not healthy or trial.get("pass_rate", 0) < HEALTHY["pass_rate"]:
+        return None
+    root = paths.MEDIC_DIR / "worktrees" / inc.id
+    base = inc.release or gitops.rev_parse("HEAD", paths.DEPLOY)
+    surfaces = [t for t in tournament.targets(inc) if t["name"] in pinned]
+    files = sorted({t["file"] for t in surfaces})
+    if not files or not (root / ".git").exists():
+        return None
+    for f in files:
+        mine = [t for t in surfaces if t["file"] == f]
+        for start, end in _changed_spans(healthy, base, f):
+            if not any(t["start"] - tournament.LINE_SLACK <= start and end <= t["end"] + tournament.LINE_SLACK
+                       for t in mine):
+                log(f"[medic] incident {inc.id}: can't restore {f}: the culprit also changed lines {start}-{end}")
+                return None
+    gitops.git("reset", "--hard", base, cwd=root)
+    gitops.git("checkout", healthy, "--", *files, cwd=root)
+    n = len(inc.remedy.get("attempts", [])) + 1
+    record: dict = {"n": n, "accepted": False, "restore": {"from": healthy, "files": files, "surfaces": sorted(pinned)}}
+    ev = Evaluator(root, RunState(good=inc.healthy_release, bad=inc.release), _verify_cases(inc), reader)
+    try:
+        m = ev.evaluate_dir(root, f"verify-{inc.id}-restore")
+    except SkipCommit as exc:
+        gitops.git("reset", "--hard", base, cwd=root)
+        record["feedback"] = f"restoring {', '.join(sorted(pinned))} crashed: {exc}"
+        return record
+    record["metrics"] = m.to_dict()
+    problems = judge(inc, m)
+    if problems:
+        gitops.git("reset", "--hard", base, cwd=root)
+        record["feedback"] = "restore: " + "; ".join(problems)
+        return record
+    names = ", ".join(sorted(pinned))
+    culprit = inc.findings.get("regression", {}).get("culprit", inc.release or "")[:8]
+    title = f"Restore {names} from {healthy[:8]}"
+    body = (f"{title}\n\nNo rewritten fix passed verification, so this undoes {culprit}'s change to {names} "
+            f"and keeps the rest of that commit. It is what first aid served in production "
+            f"(pass {trial['pass_rate']:.0%}). Whatever {culprit} meant to achieve there needs another way.\n\n"
+            f"Incident: {inc.id}\nCause: {inc.decision['cause']}\n"
+            f"Verified: pass {m.pass_rate:.0%}, errors {m.error_rate:.0%} on {m.n} runs.\n\n"
+            f"Agent-Medic-Incident: {inc.id}\n")
+    gitops.git("add", "-A", cwd=root)
+    gitops.git("commit", "-q", "-m", body, cwd=root)
+    record.update(accepted=True, commit=gitops.rev_parse("HEAD", root), branch=f"medic/fix-{inc.id}",
+                  commit_title=title, diagnosis=body.split("\n\n")[1],
+                  feedback=f"restored {names} from {healthy[:8]}: pass {m.pass_rate:.0%}, errors {m.error_rate:.0%}")
     return record
 
 
