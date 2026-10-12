@@ -146,7 +146,7 @@ def attempt(inc, reader, log=print) -> dict:
             f"Verified: pass {m.pass_rate:.0%}, errors {m.error_rate:.0%} on {m.n} runs against the live API.\n\n"
             f"Agent-Medic-Incident: {inc.id}\n")
     gitops.git("add", "-A", cwd=root)
-    gitops.git("commit", "-q", "-m", body, cwd=root)
+    gitops.commit(body, cwd=root)
     record.update(accepted=True, commit=gitops.rev_parse("HEAD", root), branch=branch,
                   feedback=f"verified: pass {m.pass_rate:.0%}, errors {m.error_rate:.0%} on {m.n} runs")
     return record
@@ -200,7 +200,7 @@ def _tournament_attempt(inc, reader, root: Path, branch: str, n: int, base_promp
             f"{m['error_rate']:.0%} on {m['n']} runs, {w['changed_lines']} changed lines.\n\n"
             f"Agent-Medic-Incident: {inc.id}\n")
     gitops.git("add", "-A", cwd=root)
-    gitops.git("commit", "-q", "-m", body, cwd=root)
+    gitops.commit(body, cwd=root)
     others = [c for c in board if not c.get("winner")]
     record.update({k: w.get(k) for k in ("commit_title", "diagnosis", "original_intent", "how_intent_is_kept",
                                          "edits", "usage")})
@@ -272,7 +272,7 @@ def restore_attempt(inc, reader, log=print) -> dict | None:
             f"Verified: pass {m.pass_rate:.0%}, errors {m.error_rate:.0%} on {m.n} runs.\n\n"
             f"Agent-Medic-Incident: {inc.id}\n")
     gitops.git("add", "-A", cwd=root)
-    gitops.git("commit", "-q", "-m", body, cwd=root)
+    gitops.commit(body, cwd=root)
     record.update(accepted=True, commit=gitops.rev_parse("HEAD", root), branch=f"medic/fix-{inc.id}",
                   commit_title=title, diagnosis=body.split("\n\n")[1],
                   feedback=f"restored {names} from {healthy[:8]}: pass {m.pass_rate:.0%}, errors {m.error_rate:.0%}")
@@ -284,11 +284,11 @@ def deploy(inc) -> dict:
     branch = inc.remedy["branch"]
     before = gitops.rev_parse("HEAD", paths.DEPLOY)
     try:
-        gitops.git("merge", "--ff-only", branch, cwd=paths.DEPLOY)
+        gitops.git(*gitops.NO_HOOKS, "merge", "--ff-only", branch, cwd=paths.DEPLOY)
     except gitops.GitError:
         # A new release shipped while Medic worked; merge on top of it instead.
         try:
-            gitops.git("merge", "--no-edit", branch, cwd=paths.DEPLOY)
+            gitops.git(*gitops.NO_HOOKS, "merge", "--no-edit", branch, cwd=paths.DEPLOY)
         except gitops.GitError as exc:
             gitops.git("merge", "--abort", cwd=paths.DEPLOY, check=False)
             return {"deployed": False, "detail": f"merge conflict with the newer release: {exc}"}
