@@ -215,7 +215,7 @@ def test_detection_keeps_running_while_a_fix_waits_for_review(pr_medic, monkeypa
         monkeypatch.setattr(m, name, lambda: None, raising=False)
     monkeypatch.setattr(m, "_neatlogs_alerts", lambda: [], raising=False)
     monkeypatch.setattr(m, "_attach_alerts", lambda i, a: None, raising=False)
-    monkeypatch.setattr(m, "_recently_escalated", lambda s: None, raising=False)
+    monkeypatch.setattr(m, "_recently_escalated", lambda s, live=None: None, raising=False)
     monkeypatch.setattr(m, "open", lambda signals, alerts=None: opened.append(signals), raising=False)
     monkeypatch.setattr(agent_mod.canary, "due", lambda state: False)
     monkeypatch.setattr(delivery, "contains", lambda root, fix, release: False)

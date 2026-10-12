@@ -209,3 +209,22 @@ def test_a_report_neatlogs_cannot_take_never_breaks_healing(monkeypatch):
     monkeypatch.setattr(neatlogs_link, "Mcp", Down)
     inc = agent_mod.Incident(signals=[], release="d" * 40, healthy_release="c" * 40, trace_ids=[], id="i10")
     assert neatlogs_link.log_report(inc, "healed", [], {}, "rag-tutorial") == ""
+
+
+def test_new_trouble_on_an_escalated_release_joins_that_incident(monkeypatch):
+    # Live: a prompt regression escalated, then the embeddings quota ran out on the same release.
+    m = Medic.__new__(Medic)
+    m.log = lambda msg: None
+    escalated = agent_mod.Incident(signals=[{"name": "quality", "metric": "canary_pass_rate"}],
+                                   release="b" * 40, healthy_release="a" * 40, trace_ids=[], id="esc", phase="escalated")
+    escalated.opened_at -= 3600                                   # opened long ago, escalated just now
+    escalated.note("escalated", "no verified fix after 3 attempts", log=lambda *_: None)
+    saved = []
+    monkeypatch.setattr(agent_mod.incidents, "load_all", lambda: [escalated])
+    monkeypatch.setattr(agent_mod.incidents, "save", saved.append)
+    quota = [agent_mod.Signal("failure", "failure_rate", 0.0, 1.0)]
+    assert m._recently_escalated(quota, live="b" * 12) is escalated
+    assert {s["name"] for s in escalated.signals} == {"quality", "failure"} and saved == [escalated]
+    assert m._recently_escalated(quota, live="c" * 12) is escalated    # now known: covered on any release
+    other = [agent_mod.Signal("latency", "p95_s", 1.0, 9.0)]
+    assert m._recently_escalated(other, live="c" * 12) is None         # a different release is its own problem

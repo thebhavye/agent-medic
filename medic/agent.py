@@ -83,7 +83,7 @@ class Medic:
                     self._attach_alerts(covering, alerts)
                 signals, alerts = [], []
         if signals:
-            escalated = self._recently_escalated(signals)
+            escalated = self._recently_escalated(signals, self._live_release())
             if escalated is None:
                 self.open(signals, alerts)
             elif alerts:
@@ -269,12 +269,29 @@ class Medic:
         except Exception as exc:  # noqa: BLE001 - arming is best effort; detection still works
             self.log(f"[medic] could not arm the runtime: {type(exc).__name__}: {exc} ({_where(exc)})")
 
-    def _recently_escalated(self, signals) -> Incident | None:
+    def _recently_escalated(self, signals, live: str | None = None) -> Incident | None:
         """Don't reopen the same problem every tick while a human handles an escalation: the
-        escalated incident that already covers these signals, or None."""
+        escalated incident that already covers these signals, or None.
+
+        An escalation covers its own signals, and anything else that goes wrong on the same
+        release (seen live: an escalated prompt regression, then the app's embeddings quota ran
+        out on that release and Medic opened a second incident that redid the whole fix). New
+        signals on that release are added to the escalated incident instead."""
         names = {s.name for s in signals}
         for inc in reversed(incidents.load_all()):
-            if inc.phase == "escalated" and time.time() - inc.opened_at < 1800 and                     names <= {s["name"] for s in inc.signals}:
+            if inc.phase != "escalated":
+                continue
+            since = max([inc.opened_at] + [e["t"] for e in inc.timeline if e.get("phase") == "escalated"])
+            if time.time() - since >= 1800:
+                continue
+            known = {s["name"] for s in inc.signals}
+            if names <= known:
+                return inc
+            if live and inc.release and live[:12] == inc.release[:12]:
+                added = [s for s in signals if s.name not in known]
+                inc.signals = [*inc.signals, *(s.__dict__ for s in added)]
+                inc.note("escalated", "also on this release: " + "; ".join(s.describe() for s in added), self.log)
+                incidents.save(inc)
                 return inc
         return None
 
