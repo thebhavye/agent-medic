@@ -212,9 +212,11 @@ class Watcher:
         if not runs:
             return True            # canary not in use: traces are all we have
         mine = [r for r in runs if r.get("release") == release[:12] and "pass_rate" in r]
-        if not mine:
-            return False
         base = self.state.get("canary_baseline")
         # Without a canary baseline there's nothing relative to compare to: require a passing score.
         bar = base - 0.25 if base is not None else 0.75
-        return mine[-1]["pass_rate"] >= bar
+        # Two passing runs in a row, and nothing failing in between: a flaky broken release passes
+        # now and then (seen live: 20-60% for an hour, then one 80% run made it "healthy").
+        if len(mine) < 2:
+            return False
+        return all(r["pass_rate"] >= bar for r in mine[-2:])
