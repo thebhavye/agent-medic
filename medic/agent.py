@@ -62,6 +62,9 @@ class Medic:
         if self.watcher.state.get("baseline") and canary.due(self.watcher.state):
             live = self._live_release()
             canary.run(self.watcher.state, self.log, code_dir=self._release_dir(live), sha=live)
+            if canary.needs_confirm(self.watcher.state):
+                self.log(f"[medic] canary below the bar on {live[:8]}: running the questions again to confirm")
+                canary.run(self.watcher.state, self.log, code_dir=self._release_dir(live), sha=live)
             save_state(self.watcher.state)
             quality = canary.regressed(self.watcher.state)
             if quality:

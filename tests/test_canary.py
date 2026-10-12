@@ -20,12 +20,31 @@ def test_regressed_needs_baseline_and_drop():
     assert canary.regressed({"canary_baseline": 1.0, "canary": []}) is None
     # A run without a pass rate (eval crashed) is not a regression.
     assert canary.regressed({"canary_baseline": 1.0, "canary": [{"at": 1.0}]}) is None
-    ok = {"canary_baseline": 1.0, "canary": [{"at": 1.0, "pass_rate": 0.9}]}
+    ok = {"canary_baseline": 1.0, "canary": [{"at": 1.0, "release": "a", "pass_rate": 0.9}] * 2}
     assert canary.regressed(ok) is None  # 0.10 drop < DROP (0.25)
-    bad = {"canary_baseline": 1.0, "canary": [{"at": 1.0, "pass_rate": 0.75}]}
-    signal = canary.regressed(bad)  # exactly DROP counts
+    bad = {"canary_baseline": 1.0, "canary": [{"at": 1.0, "release": "a", "pass_rate": 0.75},
+                                              {"at": 2.0, "release": "a", "pass_rate": 0.5}]}
+    signal = canary.regressed(bad)  # exactly DROP counts; the better of the two runs is reported
     assert signal == {"name": "quality", "metric": "canary_pass_rate",
                       "baseline": 1.0, "current": 0.75}
+
+
+def test_one_low_run_is_confirmed_before_it_counts():
+    # A healthy but flaky app: one unlucky run drops below the bar.
+    state = {"canary_baseline": 0.83, "canary": [{"at": 1.0, "release": "a", "pass_rate": 0.83},
+                                                 {"at": 2.0, "release": "a", "pass_rate": 0.5}]}
+    assert canary.regressed(state) is None
+    assert canary.needs_confirm(state) is True
+    state["canary"].append({"at": 3.0, "release": "a", "pass_rate": 0.83})   # the re-run passes
+    assert canary.regressed(state) is None and canary.needs_confirm(state) is False
+    state["canary"] += [{"at": 4.0, "release": "a", "pass_rate": 0.33}, {"at": 5.0, "release": "a", "pass_rate": 0.5}]
+    assert canary.regressed(state)["current"] == 0.5 and canary.needs_confirm(state) is False
+
+
+def test_low_runs_on_different_releases_do_not_confirm_each_other():
+    state = {"canary_baseline": 1.0, "canary": [{"at": 1.0, "release": "a", "pass_rate": 0.5},
+                                                {"at": 2.0, "release": "b", "pass_rate": 0.5}]}
+    assert canary.regressed(state) is None and canary.needs_confirm(state) is True
 
 
 def good_case(case_id="q1"):
