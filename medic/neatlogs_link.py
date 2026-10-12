@@ -11,7 +11,7 @@ evidence (over neatlogs' MCP server), and writes what it did back onto the faili
 
 What Medic creates in the project, all named "Medic: ..." so they're easy to find and remove:
 detections for failed tool calls, non-answers and refusals; threshold alert rules on them;
-metric rules on tool failure rate and tokens; and, given a public URL, one webhook.
+a metric rule on tokens; and, given a public URL, one webhook.
 """
 
 import contextlib
@@ -125,11 +125,6 @@ def _alert_rules(detections: dict, baseline: dict | None, webhook_id: str | None
                       "ruleType": "threshold", "detectionId": det_id, "thresholdCount": 3, "windowMinutes": 5,
                       "cooldownMinutes": 10, "severity": "critical" if key == "tool_failed" else "warning",
                       "channelMask": channels}
-    rules["tool_failure_rate"] = {"name": PREFIX + "tool failure rate above 25%", "ruleType": "metric_threshold",
-                                  "metricName": "tool_failure_rate", "metricAggregation": "avg",
-                                  "metricOperator": ">", "metricThresholdValue": 0.25,
-                                  "windowMinutes": 10, "cooldownMinutes": 10, "severity": "critical",
-                                  "channelMask": channels}
     tokens = (baseline or {}).get("tokens_per_run")
     if tokens:
         rules["tokens"] = {"name": PREFIX + "tokens per run 1.5x the healthy baseline", "ruleType": "metric_threshold",
@@ -137,6 +132,12 @@ def _alert_rules(detections: dict, baseline: dict | None, webhook_id: str | None
                            "metricThresholdValue": round(tokens * 1.5), "windowMinutes": 15, "cooldownMinutes": 15,
                            "severity": "warning", "channelMask": channels}
     return rules
+
+
+# Rules earlier versions created and Medic now switches off. The tool failure rate rule averaged
+# over whatever traces a window held, so one failed trace in a quiet window fired it: 43 critical
+# alerts in two weeks, each on one trace. "tool call failed (3 in 5 min)" covers the real case.
+RETIRED_RULES = {PREFIX + "tool failure rate above 25%"}
 
 
 def setup(api: Api, baseline: dict | None = None, webhook_url: str | None = None, log=print) -> dict:
@@ -165,6 +166,14 @@ def setup(api: Api, baseline: dict | None = None, webhook_url: str | None = None
         log(f"[neatlogs] webhook created: {webhook_url}")
     existing_rules = {r.get("name"): r for r in api.call("GET", "/alert-rules", limit=100).get("alertRules", [])}
     state.setdefault("rules", {})
+    for name in sorted(RETIRED_RULES):
+        old_rule = existing_rules.get(name)
+        if old_rule and old_rule.get("enabled", True):
+            try:
+                api.call("PATCH", f"/alert-rules/{old_rule['id']}", {"enabled": False})
+                log(f"[neatlogs] alert rule switched off (it fired on single traces): {name}")
+            except NeatlogsError as exc:
+                state["skipped"][f"retire:{name}"] = str(exc)
     for key, rule in _alert_rules(state["detections"], baseline, state.get("webhook")).items():
         if rule["name"] in existing_rules:
             existing = existing_rules[rule["name"]]

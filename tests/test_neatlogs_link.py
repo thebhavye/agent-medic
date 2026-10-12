@@ -71,7 +71,7 @@ def test_setup_creates_detections_rules_and_webhook_once(nl):
     assert [g["name"] for g in fake.groups] == ["Agent Medic"]
     assert set(state["detections"]) == {"tool_failed", "no_answer"}          # the classifier needs a plan
     assert "refusal" in state["skipped"]
-    assert {"tool_failed", "no_answer", "tool_failure_rate", "tokens"} <= set(state["rules"])
+    assert {"tool_failed", "no_answer", "tokens"} <= set(state["rules"])
     tokens_rule = next(r for r in fake.rules if r.get("metricName") == "tokens_total")
     assert tokens_rule["metricThresholdValue"] == 2400                          # 1.5x the healthy baseline
     assert all(r["channelMask"]["webhookIds"] == [state["webhook"]] for r in fake.rules)
@@ -286,3 +286,13 @@ def test_the_first_read_only_sets_the_checkpoint(nl):
                         "sampleTraceIds": []}]
     assert neatlogs_link.new_alerts(api) == []
     assert neatlogs_link.load()["alerts_read_until"] > 0
+
+
+
+def test_setup_switches_off_the_single_trace_tool_failure_rate_rule(nl):
+    fake, api = nl
+    fake.rules.append({"id": "old-1", "name": "Medic: tool failure rate above 25%", "enabled": True,
+                       "ruleType": "metric_threshold", "channelMask": {"webhookIds": []}})
+    neatlogs_link.setup(api, log=lambda m: None)
+    assert fake.rules[0]["enabled"] is False
+    assert not any(r.get("metricName") == "tool_failure_rate" for r in fake.rules[1:])
