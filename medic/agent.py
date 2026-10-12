@@ -60,7 +60,10 @@ class Medic:
             signals = [*signals, Signal("self_healed", "self_healed_rate", 0.0, len(healed) / len(recent))]
         # Wrong-but-confident answers leave no trace signal; the canary eval catches them.
         tag = recent[-1].release if recent else ""
-        if self.watcher.state.get("baseline") and canary.due(self.watcher.state, tag):
+        # A release whose incident already waits on the user's merge is known broken: checking it
+        # again every interval only spends model calls and shows the same low score.
+        known_broken = bool(tag) and any((i.release or "")[:12] == tag[:12] for i in waiting)
+        if self.watcher.state.get("baseline") and not known_broken and canary.due(self.watcher.state, tag):
             live = self._live_release()
             self.watcher.state["canary_release_tag"] = tag
             canary.run(self.watcher.state, self.log, code_dir=self._release_dir(live), sha=live)
