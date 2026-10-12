@@ -412,7 +412,8 @@ function legend(){
   return h("div", {class:"legend"},
     h("span", null, h("b", {style:"background:var(--ok)"}), "trace answered"),
     h("span", null, h("b", {style:"background:var(--bad)"}), "trace failed"),
-    h("span", null, h("b", {style:"background:var(--accent);border-radius:2px;height:3px;width:14px"}), "known-answer pass rate"),
+    h("span", null, h("b", {style:"background:var(--accent);border-radius:2px;height:3px;width:14px"}), "known-answer pass rate (the release's own code)"),
+    h("span", null, h("b", {style:"background:var(--fix);transform:rotate(45deg);border-radius:1px;width:8px;height:8px"}), "with first aid"),
     h("span", null, h("b", {style:"background:var(--fix-bg);border:1px solid var(--fix);border-radius:2px"}), "Medic fix serving traffic"));
 }
 
@@ -488,14 +489,31 @@ function chart(prod, inc){
 
   // incident markers
   var marks = {open:"detected", decided:"diagnosed", first_aid:"first aid", canary:"canary", deployed:"promoted", resolved:"healed", escalated:"escalated"};
-  var lastX = -1e9, row = 0;
+  var ends = [-1e9, -1e9, -1e9], seen = {};
   events.forEach(function(e){
-    if (!marks[e.phase]) return;
+    if (!marks[e.phase] || seen[e.phase]) return;
+    seen[e.phase] = true;                       // one label per phase: the first time it happened
     var x = X(e.t), color = e.phase === "open" || e.phase === "escalated" ? "var(--bad)" : e.phase === "resolved" ? "var(--ok)" : "var(--fix)";
-    row = x - lastX < 70 ? (row + 1) % 2 : 0; lastX = x;
-    svg.appendChild(S("line", {x1:x, x2:x, y1:12 + row * 13, y2:yB + laneB + 6, stroke:color, "stroke-width":1.2, "stroke-dasharray":"2 3"}));
-    svg.appendChild(S("text", {x:x + 4, y:10 + row * 13 + 9, fill:color, "font-size":10.5, "font-weight":600, style:"fill:" + color}, marks[e.phase]));
+    var row = ends.findIndex(function(end){ return x > end + 6; });
+    if (row < 0) row = ends.indexOf(Math.min.apply(null, ends));
+    ends[row] = x + 4 + marks[e.phase].length * 6.4;
+    svg.appendChild(S("line", {x1:x, x2:x, y1:6 + row * 12, y2:yB + laneB + 6, stroke:color, "stroke-width":1.2, "stroke-dasharray":"2 3"}));
+    svg.appendChild(S("text", {x:x + 4, y:4 + row * 12 + 9, fill:color, "font-size":10.5, "font-weight":600, style:"fill:" + color}, marks[e.phase]));
   });
+  // First aid's own proof: the known-answer eval on the broken release with the bandage on. The
+  // line above keeps measuring the release's code without it, so it stays low until the cure ships.
+  var fa = inc && inc.first_aid, faAt = fa && (fa.applied_at || (events.find(function(e){ return e.phase === "first_aid"; }) || {}).t);
+  if (fa && fa.trial && fa.trial.pass_rate != null && faAt) {
+    var fx = X(faAt), fy = yA + laneA - fa.trial.pass_rate * laneA;
+    var dm = S("path", {d:"M" + fx + " " + (fy - 6) + " l6 6 l-6 6 l-6 -6 z", fill:"var(--fix)", stroke:"var(--panel)", "stroke-width":1.5});
+    dm.addEventListener("mousemove", function(ev){ showTip(ev, ["With first aid · " + pct(fa.trial.pass_rate), fa.what || "", clock(faAt)]); });
+    dm.addEventListener("mouseleave", hideTip);
+    svg.appendChild(dm);
+    // Below the diamond (the incident labels sit above), and to its left near the right edge.
+    var nearEdge = fx > W - R - 130;
+    svg.appendChild(S("text", {x:nearEdge ? fx - 9 : fx + 9, y:fy + 20, "text-anchor":nearEdge ? "end" : "start", "font-size":10.5,
+      "font-weight":600, style:"fill:var(--fix)"}, "with first aid " + pct(fa.trial.pass_rate)));
+  }
 
   // time axis
   var ticks = 6;
@@ -848,7 +866,11 @@ function renderWorld(root){
 function render(){
   if (!DATA) return;
   var r = route();
-  document.querySelectorAll("#nav a").forEach(function(a){ a.classList.toggle("on", a.dataset.v === r.view); });
+  document.querySelectorAll("#nav a").forEach(function(a){
+    a.classList.toggle("on", a.dataset.v === r.view);
+    // Benchmark and Real world are the demo world's views: empty on a user's project.
+    a.style.display = DATA.project && (a.dataset.v === "bench" || a.dataset.v === "world") ? "none" : "";
+  });
   ["live","incidents","bench","world"].forEach(function(v){
     var el = document.getElementById("v-" + v);
     el.classList.toggle("on", v === r.view);
