@@ -75,12 +75,25 @@ def answers_hold(record: dict, state: dict) -> tuple[bool, str]:
                 f"({'meets' if ok else 'below'} the {bar:.0%} bar)")
 
 
+def _low(state: dict, record: dict) -> bool:
+    base = state.get("canary_baseline")
+    return base is not None and "pass_rate" in record and base - record["pass_rate"] >= DROP
+
+
+def needs_confirm(state: dict) -> bool:
+    """The latest canary fell below the bar, but no run on that release has confirmed it yet.
+
+    A model gives a different answer now and then, so with a handful of questions one unlucky
+    run can drop a whole question's worth. Medic runs the questions again before calling it."""
+    runs = state.get("canary", [])
+    return bool(runs) and _low(state, runs[-1]) and regressed(state) is None
+
+
 def regressed(state: dict) -> dict | None:
-    """A quality signal if the latest canary fell well below the canary baseline."""
+    """A quality signal if the last two canary runs on the same release both fell well below the
+    canary baseline: one low run alone is noise until a second one agrees."""
     base, runs = state.get("canary_baseline"), state.get("canary", [])
-    if base is None or not runs or "pass_rate" not in runs[-1]:
+    if len(runs) < 2 or not all(_low(state, r) for r in runs[-2:]) or runs[-1].get("release") != runs[-2].get("release"):
         return None
-    current = runs[-1]["pass_rate"]
-    if base - current >= DROP:
-        return {"name": "quality", "metric": "canary_pass_rate", "baseline": base, "current": current}
-    return None
+    current = max(r["pass_rate"] for r in runs[-2:])
+    return {"name": "quality", "metric": "canary_pass_rate", "baseline": base, "current": current}
